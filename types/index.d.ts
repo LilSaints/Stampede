@@ -15,6 +15,11 @@ export interface StampedeUiState {
   wakeSeen?: Record<string, number>;
   lastPoll: number;
   wakeEnabled: boolean;
+  compactBand?: boolean;
+  dismissedAlertSeq?: number;
+  toastPending?: { runId: string; hubSeq: number; text: string }[];
+  wakeLimitNotified?: boolean;
+  wakeLimitToastPending?: boolean;
   pendingSince: number;
   lastTrigger: number;
   lastToast: number;

@@ -1,7 +1,57 @@
 import { test, expect, mock } from 'claude-code/testing';
-import { initialState, reduce, wakePrompt, shouldWake } from './stampede-ui';
+import { initialState, reduce, wakePrompt, shouldWake, bandText, runHeading } from './stampede-ui';
 
 const run = (id = 'owned', session = 'owner') => ({ runId: id, name: id, orchestratorSessionId: session, status: 'running', seenSeq: 0, agents: [], phases: [], budget: { spent: 42 }, resultPath: 'C:/state/result.json', messages: [], log: [] });
+test('band counts owned work and keeps completed-run unread messages visible', async () => {
+  const owned: any = { ...run(), unreadForOrchestrator: 2, agents: [{ status: 'running' }, { status: 'waiting' }] };
+  const state = { ...initialState(), ownedRunIds: ['owned'], runs: { owned, other: { ...run('other', 'someone'), unreadForOrchestrator: 99 } } };
+  expect(bandText(state)).toBe('Stampede ● 1 runs · 1 running · 1 waiting · 2 msg for Claude · 42 tok');
+  owned.status = 'completed';
+  expect(bandText(state)).toBe('Stampede ● 0 runs · 0 running · 0 waiting · 2 msg for Claude · 0 tok');
+  owned.unreadForOrchestrator = 0; expect(bandText(state)).toBe(undefined);
+  expect(runHeading({ ...run(), startedAt: '2026-10-08T00:00:00Z', budget: { spent: 42, total: 500 } }, Date.parse('2026-10-08T00:02:00Z'))).toBe('owned · owned · running · 2:00 · 42 / 500 tokens');
+});
+
+test('band authentication alerts can be dismissed or compacted', async ($, on) => {
+  const fixture: any = { ...run(), notifications: [{ hubSeq: 5, type: 'backend.unavailable', data: { hint: "auth failed: run 'codex login'" } }] };
+  let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['owned'], runs: { owned: fixture } }, version = 1;
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  const ui = await $.ui.mount({ plugin: 'stampede', surface: 'terminal', component: 'AbovePrompt', props: {} as any });
+  expect(await ui.find({ key: 'dismiss-alert' })).toBeDefined();
+  await ui.press({ key: 'dismiss-alert' }); await ui.redraw();
+  expect(await ui.find({ key: 'dismiss-alert' })).toBeUndefined();
+  fixture.notifications[0].hubSeq = 6; state = { ...state, compactBand: true }; version++;
+  await ui.redraw(); expect(await ui.find({ key: 'dismiss-alert' })).toBeUndefined();
+  await ui.unmount();
+});
+
+test('toasts inside the rate window are coalesced and shown on a later poll', async ($, on) => {
+  let state = { ...initialState(), busy: true }, version = 0;
+  let events = [{ runId: 'owned', hubSeq: 1, type: 'message.accepted', data: { from: 'worker', to: 'orchestrator', seq: 1, text: 'first' } }];
+  const shown: string[] = [], clock = mock.clock(on, { now: 100000 });
+  mock.store(on); mock.env(on, { STAMPEDE_HOME: 'C:/fixture' });
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('session.surfaces', () => ({ value: ['terminal'] }));
+  on('session.id', () => ({ value: 'owner' }));
+  on('session.start', () => ({ cwd: 'C:/fixture' }));
+  on('command.register', () => ({ value: { command: 'stampede' } }));
+  on('ui.status', () => ({ value: undefined }));
+  on('ui.toast', (_$, event) => { shown.push(event.text); return { value: undefined }; });
+  on('fs.read', (_$, event) => ({ value: event.path.endsWith('hub.json') ? '{"port":1234}' : 'synthetic-token' }));
+  on('http.fetch', (_$, event) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(event.url.includes('/events') ? { hubSeq: events.length, events } : { hubSeq: events.length, uiApiVersion: 1, runs: [run()] }) } }));
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:/fixture' });
+  expect(shown.length).toBe(1);
+  events = [...events, ...[2, 3].map(seq => ({ runId: 'owned', hubSeq: seq, type: 'message.accepted', data: { from: 'worker', to: 'orchestrator', seq, text: 'next' } }))];
+  await clock.advance(1000); expect(shown.length).toBe(1);
+  await clock.advance(4000); expect(shown.length).toBe(2); expect(shown[1]).toBe('2 Stampede updates');
+  state = { ...state, wakeTimes: Array(12).fill(105000) }; version++;
+  await clock.advance(5000); expect(shown.length).toBe(3); expect(shown[2]!.includes('wake paused (limit)')).toBe(true);
+  await clock.advance(5000); expect(shown.length).toBe(3);
+  state = { ...state, wakeTimes: [] }; version++;
+  await clock.advance(1000); expect(state.wakeLimitNotified).toBe(false);
+});
 test('wake ownership and seen cursors are session-specific', async () => {
   const events = [
     { runId: 'owned', hubSeq: 1, type: 'run.status', data: { status: 'completed' } },
@@ -76,7 +126,7 @@ for (const surface of ['terminal', 'desktop'] as const) for (const width of [38,
 test('a large run stays below the pane payload budget', async ($, on) => {
   const large: any = run();
   large.phases = Array.from({ length: 20 }, (_, i) => ({ title: `phase-${i}-` + 'p'.repeat(60) }));
-  large.agents = Array.from({ length: 1000 }, (_, i) => ({ name: `${i}-` + 'a'.repeat(35), backend: 'codex', status: 'running', phase: large.phases[i % 20].title, tokens: 100000, comms: true }));
+  large.agents = Array.from({ length: 1000 }, (_, i) => ({ name: `${i}-` + 'a'.repeat(35), backend: 'codex', status: 'running', phase: large.phases[i % 20].title, tokens: 100000, comms: true, lastLine: 'activity'.repeat(80) }));
   large.messages = Array.from({ length: 20 }, (_, seq) => ({ seq, from: 'a'.repeat(40), to: 'b'.repeat(40), text: 'm'.repeat(16000) }));
   large.log = Array(10).fill('x'.repeat(1000));
   const others = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`other-${i}`, run(`other-${i}-` + 'x'.repeat(40), 'someone')]));
@@ -85,6 +135,10 @@ test('a large run stays below the pane payload budget', async ($, on) => {
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 160, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
   const size = JSON.stringify(await ui.drawn()).length;
   if (size >= 20000) throw new Error(`pane payload ${size} exceeds 20000`);
+  state.composer = null as any;
+  await ui.redraw();
+  const closedSize = JSON.stringify(await ui.drawn()).length;
+  if (closedSize >= 20000) throw new Error(`closed composer pane payload ${closedSize} exceeds 20000`);
   await ui.unmount();
 });
 test('tool interception attaches session ownership and selects the new run', async ($, on) => {

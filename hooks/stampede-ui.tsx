@@ -6,10 +6,10 @@ type Engine = EngineInterface;
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 const clean = (text: string, max = 400) => String(text).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
 export function initialState(): StampedeUiState {
-  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], composer: null, inFlight: false, lastPoll: 0, wakeEnabled: true, pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
+  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], composer: null, inFlight: false, lastPoll: 0, wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
 }
 export function reduce(state: StampedeUiState, snapshot: any, events: any[], session: string, now: number): StampedeUiState {
-  const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
+  const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], toastPending: [...state.toastPending ?? []], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
   for (const run of snapshot.runs ?? []) next.runs[run.runId] = run;
   next.ownedRunIds = Object.values(next.runs).filter(r => r.orchestratorSessionId === session).map(r => r.runId);
   if (!next.selectedRunId || !next.runs[next.selectedRunId]) next.selectedRunId = next.ownedRunIds[0] ?? snapshot.runs?.[0]?.runId ?? null;
@@ -22,10 +22,17 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
     if (kind === 'run.status' && terminal(event.data.status)) { kind = 'run.terminal'; text = `run ${run.runId} "${run.name}": ${event.data.status}. Get it with workflow_result.`; }
     else if (kind === 'message.accepted' && (event.data.to === 'orchestrator' || event.data.to === '*') && !['orchestrator', 'system'].includes(event.data.from)) { kind = 'message.orchestrator'; text = `run ${run.runId}: message from ${event.data.from} → orchestrator (#${event.data.seq}): ${JSON.stringify(clean(event.data.text, 280))}. Read workflow_messages.`; }
     else if (['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'orchestrator.action'].includes(kind)) text = `run ${run.runId}: ${kind} ${clean(JSON.stringify(event.data), 230)}`;
-    if (text && !next.pendingWake.some(w => w.hubSeq === event.hubSeq)) { next.pendingWake.push({ runId: run.runId, hubSeq: event.hubSeq, kind, text: clean(text) }); next.pendingSince ||= now; next.lastTrigger = now; }
+    if (text && !next.pendingWake.some(w => w.hubSeq === event.hubSeq)) {
+      next.pendingWake.push({ runId: run.runId, hubSeq: event.hubSeq, kind, text: clean(text) }); next.pendingSince ||= now; next.lastTrigger = now;
+      if (['run.terminal', 'message.orchestrator', 'backend.unavailable'].includes(kind)) next.toastPending.push({ runId: run.runId, hubSeq: event.hubSeq, text: clean(text, 120) });
+    }
   }
   next.pendingWake = next.pendingWake.filter(w => next.runs[w.runId] && w.hubSeq > (next.runs[w.runId]?.seenSeq ?? 0));
+  next.toastPending = next.toastPending.filter(w => next.runs[w.runId] && w.hubSeq > (next.runs[w.runId]?.seenSeq ?? 0)).slice(-200);
   next.wakeTimes = state.wakeTimes.filter(time => now - time < 3600000);
+  const limited = next.wakeEnabled && next.pendingWake.some(w => w.kind !== 'orchestrator.action') && next.wakeTimes.length >= next.uiConfig.maxWakesPerHour;
+  if (!limited) { next.wakeLimitNotified = false; next.wakeLimitToastPending = false; }
+  else if (!next.wakeLimitNotified) { next.wakeLimitNotified = true; next.wakeLimitToastPending = true; }
   return next;
 }
 export function wakePrompt(state: StampedeUiState) {
@@ -42,6 +49,26 @@ export function statusText(state: StampedeUiState) {
   if (!active.length) return undefined;
   return `stampede ● ${active.reduce((n, r) => n + r.agents.filter((a: any) => ['running', 'waiting'].includes(a.status)).length, 0)} · ${Math.round(active.reduce((n, r) => n + r.budget.spent, 0) / 1000)}k`;
 }
+const tokens = (value: number) => value >= 1000 ? `${Math.round(value / 100) / 10}k` : String(value);
+export function bandText(state: StampedeUiState) {
+  const owned = state.ownedRunIds.map(id => state.runs[id]).filter(Boolean);
+  const active = owned.filter(run => !terminal(run.status));
+  const unread = owned.reduce((sum, run) => sum + (run.unreadForOrchestrator ?? 0), 0);
+  if (!active.length && !unread) return undefined;
+  const agents = active.flatMap(run => run.agents);
+  const running = agents.filter(a => ['starting', 'running', 'resuming'].includes(a.status)).length;
+  const waiting = agents.filter(a => a.status === 'waiting').length;
+  return `Stampede ● ${active.length} runs · ${running} running · ${waiting} waiting · ${unread} msg for Claude · ${tokens(active.reduce((sum, run) => sum + run.budget.spent, 0))} tok`;
+}
+export function runHeading(run: any, now: number) {
+  const start = Date.parse(run.startedAt), end = run.endedAt ? Date.parse(run.endedAt) : now;
+  const seconds = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1000)) : 0;
+  const duration = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  return `${clean(run.name, 60)} · ${clean(run.runId, 40)} · ${run.status} · ${duration} · ${tokens(run.budget.spent)} / ${run.budget.total == null ? '∞' : tokens(run.budget.total)} tokens`;
+}
+const phaseCounts = (agents: any[]) => ['queued', 'starting', 'running', 'waiting', 'idle', 'done', 'failed', 'cancelled', 'skipped'].map(status => {
+  const count = agents.filter(agent => agent.status === status).length; return count ? `${count} ${status}` : '';
+}).filter(Boolean).join(' · ');
 async function state($: Engine) { return (await $.state.get({ plugin: 'stampede', key: 'ui' })).value ?? initialState(); }
 async function change($: Engine, fn: (s: StampedeUiState) => StampedeUiState) {
   await update($, { plugin: 'stampede', key: 'ui' }, current => fn(current ?? initialState()));
@@ -97,7 +124,13 @@ async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stamp
       next.hub.url = snapshot.url; next.inFlight = false; next.lastPoll = now;
       await change($, s => ({ ...reduce(s, snapshot.value, updates.value.events ?? [], session, now), hub: next.hub, inFlight: false, lastPoll: now }));
       $.ui.status(statusText(next));
-      if (next.pendingWake.length > held.pendingWake.length && now - held.lastToast > 5000) { $.ui.toast(clean(next.pendingWake.at(-1)!.text, 120)); await change($, s => ({ ...s, lastToast: now })); }
+      const toastState = await state($);
+      const toastCount = (toastState.toastPending?.length ?? 0) + Number(!!toastState.wakeLimitToastPending);
+      if (toastCount && (!toastState.lastToast || now - toastState.lastToast >= 5000)) {
+        const pending = toastState.toastPending ?? [];
+        await change($, s => ({ ...s, lastToast: now, wakeLimitToastPending: false, toastPending: s.toastPending?.filter(item => !pending.some(shown => shown.hubSeq === item.hubSeq)) }));
+        $.ui.toast(toastCount > 1 ? `${toastCount} Stampede updates` : toastState.wakeLimitToastPending ? 'Stampede wake paused (limit) — use Wake now in the band' : pending[0]!.text);
+      }
       await flush($);
     } catch (error) { await change($, s => ({ ...s, inFlight: false, hub: { ...s.hub, ok: false, lastError: String(error) } })); }
   }
@@ -122,7 +155,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, event, next) => {
     if (!(await $.session.surfaces()).length) return next(event);
     const wakeEnabled = (await $.store.get('wakeEnabled')) !== false;
-    await change($, s => ({ ...s, stampedeHome: typeof options.stampedeHome === 'string' && options.stampedeHome ? options.stampedeHome : undefined, wakeEnabled, inFlight: false, lastPoll: 0 }));
+    const compactBand = (await $.store.get('compactBand')) === true;
+    await change($, s => ({ ...s, stampedeHome: typeof options.stampedeHome === 'string' && options.stampedeHome ? options.stampedeHome : undefined, wakeEnabled, compactBand, inFlight: false, lastPoll: 0 }));
     await $.command.register({ name: 'stampede', description: 'Open Stampede workflows; wake on|off; hub', argumentHint: '[wake on|off | hub]', immediate: true });
     $.clock.every(1000, () => poll($));
     await poll($); return next(event);
@@ -149,10 +183,11 @@ export const register: Register = (on, options) => {
     await openPane($); return {};
   });
   on('ui.render', { component: 'AbovePrompt' }, async ($, event, next) => {
-    const held = await state($); const count = statusText(held);
-    if (!count && !held.pendingWake.length) return next(event);
+    const held = await state($); const count = bandText(held);
+    const alert = held.ownedRunIds.flatMap(id => held.runs[id]?.notifications ?? []).filter(e => e.type === 'backend.unavailable' && e.hubSeq > (held.dismissedAlertSeq ?? 0)).sort((a, b) => b.hubSeq - a.hubSeq)[0];
+    if (!count && !held.pendingWake.length && !held.hub.versionMismatch && (!alert || held.compactBand)) return next(event);
     const { Box, Text, Button } = $.ui.resolve(event);
-    return <Box flexDirection="column"><Box><Text>{held.hub.versionMismatch ? 'Stampede: plugin and hub versions differ — restart the hub' : held.hub.ok ? count ?? 'Stampede updates' : 'Stampede hub offline (retrying)'}</Text><Button key="open" onPress={() => { void openPane($); }}>Open</Button></Box>{held.pendingWake.length > 0 && <Box><Text>{held.pendingWake.length} update(s){!held.wakeEnabled ? ' · wakes off' : held.wakeTimes.length >= held.uiConfig.maxWakesPerHour ? ' · wake paused (limit)' : ''}</Text><Button key="wake" onPress={() => { void flush($, true); }}>Tell Claude</Button></Box>}</Box>;
+    return <Box flexDirection="column"><Box><Text>{held.hub.versionMismatch ? 'Stampede: plugin and hub versions differ — restart the hub' : !held.hub.ok && statusText(held) ? 'Stampede hub offline (retrying)' : count ?? 'Stampede updates'}</Text><Button key="open" onPress={() => { void openPane($); }}>Open</Button></Box>{alert && !held.compactBand && <Box><Text>{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text><Button key="dismiss-alert" onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}{held.pendingWake.length > 0 && <Box><Text>{held.pendingWake.length} update(s){!held.wakeEnabled ? ' · wakes off' : held.wakeTimes.length >= held.uiConfig.maxWakesPerHour ? ' · wake paused (limit)' : ''}</Text><Button key="wake" onPress={() => { void flush($, true); }}>{held.wakeEnabled && held.wakeTimes.length >= held.uiConfig.maxWakesPerHour ? 'Wake now' : 'Tell Claude'}</Button></Box>}</Box>;
   });
   on('ui.render', { component: 'Pane', requestId: 'stampede' }, async ($, event, next) => {
     if (event.surface !== 'terminal' && event.surface !== 'desktop') return next(event);
@@ -160,23 +195,25 @@ export const register: Register = (on, options) => {
     const runs = Object.values(held.runs).sort((a, b) => Number(held.ownedRunIds.includes(b.runId)) - Number(held.ownedRunIds.includes(a.runId))).slice(0, 9);
     const run = held.selectedRunId ? held.runs[held.selectedRunId] : undefined;
     const width = (event.props as any).bodyColumns ?? 100;
-    let rowsRemaining = 8;
+    // Leave room for the recipient picker and the bounded 4,000-character draft.
+    let rowsRemaining = held.composer ? 4 : 8;
     return <Box flexDirection="column">
       {!held.hub.ok && <Text>{clean(held.hub.lastError ?? 'Hub not running', 200)}</Text>}
       {held.hub.versionMismatch && <Text>Plugin and hub versions differ — restart the hub</Text>}
       <Box>{runs.map((r, i) => <Button key={`run-${i}`} hotkey={String(i + 1)} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId })); }}>{`${i + 1} ${held.ownedRunIds.includes(r.runId) ? '' : 'other: '}${clean(r.name, 30)}`}</Button>)}</Box>
       {run ? <Box flexDirection="column">
-        <Text>{`${clean(run.name, 60)} · ${run.status} · ${Math.round(run.budget.spent / 1000)}k tokens`}</Text>
+        <Text dimColor={!held.hub.ok}>{runHeading(run, held.lastPoll)}</Text>
+        {held.actionPending && <Text>Updating…</Text>}
         {(run.phases.length ? run.phases : [{ title: 'Agents' }]).slice(0, 8).map((phase: any, index: number) => {
           const agents = run.agents.filter((a: any) => a.phase === phase.title || !a.phase && index === 0);
           const shown = Math.min(agents.length, 30, rowsRemaining); rowsRemaining -= shown;
-          return <Box key={phase.title} flexDirection="column"><Text>{`${clean(phase.title, 60)} · ${agents.length} agents`}</Text>
-            {agents.slice(0, shown).map((a: any) => <Box key={a.name} flexDirection={width < 60 ? 'column' : 'row'}><Text>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
+          return <Box key={phase.title} flexDirection="column"><Text dimColor={!held.hub.ok}>{`${clean(phase.title, 60)} · ${agents.length} agents · ${phaseCounts(agents)}`}</Text>
+            {agents.slice(0, shown).map((a: any) => <Box key={a.name} flexDirection={width < 60 ? 'column' : 'row'}><Text dimColor={!held.hub.ok}>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens · ${clean(a.lastLine ?? (a.status === 'waiting' ? 'wait_for_message' : a.lastActivity ? `active ${Math.max(0, Math.floor((held.lastPoll - Date.parse(a.lastActivity)) / 1000))}s ago` : '—'), 80)}` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
             {agents.length > shown && <Text>{`…and ${agents.length - shown} more`}</Text>}
           </Box>;
         })}
         <Text>{`Messages (${run.unreadForOrchestrator ?? 0} for Claude; latest 10 shown)`}</Text>
-        {(run.messages ?? []).slice(-10).map((m: any) => <Text key={`message-${m.seq}`}>{`#${m.seq} ${clean(m.from, 40)} → ${clean(m.to, 40)}: ${clean(m.text, 180)}`}</Text>)}
+        {(run.messages ?? []).slice(-10).map((m: any) => <Text key={`message-${m.seq}`} dimColor={!held.hub.ok}>{`#${m.seq} ${clean(m.from, 40)} → ${clean(m.to, 40)}: ${clean(m.text, 180)}`}</Text>)}
         {run.phases.length > 8 && <Text>{`…and ${run.phases.length - 8} more phases`}</Text>}<Text>{`Log: ${(run.log ?? []).slice(-10).map((line: string) => clean(line, 120)).join(' · ')}`}</Text>
         {!terminal(run.status) && <Box><Button key="pause" dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'workflow_control', { runId: run.runId, action: run.status === 'paused' ? 'resume' : 'pause' }); }}>{run.status === 'paused' ? 'Resume' : 'Pause'}</Button><Button key="cancel" onPress={() => { void change($, s => ({ ...s, cancelConfirm: true })); }}>Cancel</Button><Button key="compose" onPress={() => { void change($, s => ({ ...s, composer: { to: '*', text: '' } })); }}>Send message</Button></Box>}
         <Button key="copy" onPress={press => { void $.ui.copy({ text: run.resultPath, surface: press.surface }); }}>Copy result path</Button>
