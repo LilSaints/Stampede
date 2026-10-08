@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
@@ -12,13 +12,22 @@ if (prompt === 'crash') { process.stderr.write('fixture crash'); process.exit(1)
 if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 authentication failed' } }); process.exit(1); }
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
+if (/^fixture:recovery:[ab]$/.test(prompt)) {
+  await mkdir('.stampede', { recursive: true });
+  const marker = `.stampede/recovery-${prompt.at(-1)}.json`;
+  let prior; try { prior = await readFile(marker, 'utf8'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!prior) {
+    await writeFile(marker, JSON.stringify({ pid: process.pid }));
+    await new Promise(() => { setInterval(() => {}, 1000); });
+  }
+}
 let scenarioOutput;
 if (prompt.startsWith('Adversarially verify: fixture-')) scenarioOutput = JSON.stringify({ isReal: prompt.endsWith('fixture-real') });
 const referenceJudge = /^Judge "(fixture-real|fixture-rejected)" via the (correctness|security|repro) lens/.exec(prompt);
 if (referenceJudge) scenarioOutput = JSON.stringify({ real: referenceJudge[1] === 'fixture-real' && referenceJudge[2] !== 'repro' });
 const designJudge = /^Score fixture design ([ABC])$/.exec(prompt);
 if (designJudge) scenarioOutput = JSON.stringify({ score: { A: 7, B: 10, C: 9 }[designJudge[1]] });
-if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
+if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt.startsWith('fixture:recovery:') || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
   const server = codex
