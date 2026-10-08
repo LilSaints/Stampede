@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, appendFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { codexSchema, validateSchema } from '../../src/backends/codexSchema.js';
-import { Store, readJson, readJournal } from '../../src/hub/store.js';
+import { Store, atomicJson, readJson, readJournal } from '../../src/hub/store.js';
 
 test('Codex encoding is lossless for optional properties, arrays and local refs', () => {
   const source = { type: 'object', properties: { label: { type: 'string', minLength: 2 }, nested: { $ref: '#/$defs/item' }, values: { type: 'array', items: { $ref: '#/$defs/item' } } }, required: ['label'], additionalProperties: false, $defs: { item: { type: 'object', properties: { number: { type: 'integer' } }, additionalProperties: false } } };
@@ -43,4 +45,25 @@ test('durable store serializes concurrent appends, atomically replaces snapshots
     assert.equal((await readJournal(journal)).length, 51);
     await store.flush();
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('atomic snapshots retry antivirus-style rename contention without losing the prior snapshot', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede rename '));
+  const target = path.join(dir, 'snapshot.json'), rename = fs.rename;
+  try {
+    await atomicJson(target, { version: 1 });
+    let failures = 3, attempts = 0;
+    t.mock.method(fs, 'rename', async (...args: Parameters<typeof rename>) => {
+      attempts++;
+      if (failures-- > 0) throw Object.assign(new Error('synthetic scanner lock'), { code: 'EBUSY' });
+      return rename(...args);
+    });
+    syncBuiltinESMExports();
+    await atomicJson(target, { version: 2 });
+    assert.equal(attempts, 4); assert.deepEqual(await readJson(target), { version: 2 });
+    failures = 10; attempts = 0;
+    await assert.rejects(atomicJson(target, { version: 3 }), { code: 'EBUSY' });
+    assert.equal(attempts, 6); assert.deepEqual(await readJson(target), { version: 2 });
+    assert.deepEqual(await fs.readdir(dir), ['snapshot.json']);
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(dir, { recursive: true, force: true }); }
 });

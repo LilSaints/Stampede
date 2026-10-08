@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, copyFile, writeFile } from 'node:fs/promises';
 import { codexArgv } from '../../src/backends/codex.js';
 import { claudeArgv } from '../../src/backends/claude.js';
 import { launchTurn, workerEnv } from '../../src/backends/procs.js';
@@ -28,9 +28,11 @@ test('Claude read-only coordination permits messaging without file edits or shel
   assert.ok(claudeArgv({ ...launch('.'), comms: false, persistNonComms: false }).includes('--no-session-persistence'));
 });
 test('shell-free backend receives a long UTF-8 prompt over stdin and preserves resume session', async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede-adapter-'));
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede adapter space '));
   try {
-    const a = launch(dir); const prompt = 'é'.repeat(50000);
+    const a = launch(dir); a.entry = path.join(dir, 'fake backend.mjs');
+    await copyFile(path.resolve('test/fake-backends/cli.mjs'), a.entry);
+    const prompt = 'é'.repeat(50000);
     const first = await launchTurn(a, prompt).done;
     assert.equal(first.ok, true); assert.equal(first.text, prompt);
     assert.equal(first.usage.reasoningTokens, 1);
@@ -39,7 +41,31 @@ test('shell-free backend receives a long UTF-8 prompt over stdin and preserves r
     assert.equal(next.text, 'continued');
     const fallback = await launchTurn({ ...a, developerInstructionsFlag: false }, 'prompt').done;
     assert.equal(fallback.text, '<stampede-contract>\nfixture\n</stampede-contract>\nprompt');
+    const claude = await launchTurn({ ...a, backend: 'claude' }, prompt).done;
+    assert.equal(claude.ok, true); assert.equal(claude.text, prompt);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('Windows cancellation kills the worker and its descendant', { skip: process.platform !== 'win32', timeout: 15000 }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede kill tree '));
+  let handle: ReturnType<typeof launchTurn> | undefined;
+  try {
+    const entry = path.join(dir, 'tree fixture.mjs');
+    await writeFile(entry, `import {spawn} from 'node:child_process';
+const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:true,stdio:'ignore'});
+child.once('spawn',()=>console.log(JSON.stringify({type:'fixture.child',pid:child.pid})));
+process.stdin.resume(); setInterval(()=>{},1000);`);
+    let descendant: number | undefined;
+    handle = launchTurn({ ...launch(dir), entry, timeoutMs: 12000 }, 'fixture', { onEvent(event) { if (event.type === 'fixture.child') descendant = event.pid; } });
+    const deadline = Date.now() + 10000;
+    while (!descendant && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(descendant, 'descendant startup must be observed before cancellation');
+    process.kill(descendant, 0);
+    await handle.kill();
+    assert.equal((await handle.done).error?.kind, 'cancelled');
+    assert.throws(() => process.kill(descendant!, 0), { code: 'ESRCH' });
+    assert.throws(() => process.kill(handle!.pid!, 0), { code: 'ESRCH' });
+  } finally { await handle?.kill(); await rm(dir, { recursive: true, force: true }); }
 });
 test('worker environment strips desktop identity and hub home; token logs are redacted', async () => {
   const before = process.env.STAMPEDE_HOME; process.env.STAMPEDE_HOME = 'private';

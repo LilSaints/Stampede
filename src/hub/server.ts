@@ -64,10 +64,27 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     for await (const chunk of request) { size += chunk.length; if (size > 4 * 1024 * 1024) throw new Error('request body too large'); parts.push(chunk); }
     return JSON.parse(Buffer.concat(parts).toString('utf8') || '{}');
   }
-  async function messages(run: Run) { const execution = manager.active.get(run.id); if (execution) return execution.bus.messages; return (await readJournal<any>(path.join(store.runDir(run.id), 'messages.jsonl'))).filter(r => r.kind === 'message.accepted').map(r => r.value.message); }
+  async function messageState(run: Run) {
+    const execution = manager.active.get(run.id);
+    if (execution) return { messages: execution.bus.messages, undeliverable: execution.bus.deliveries.filter(d => d.state === 'undeliverable').length };
+    const records = await readJournal<any>(path.join(store.runDir(run.id), 'messages.jsonl'));
+    const undeliverable = new Set<string>();
+    for (const record of records) {
+      const deliveries = record.kind === 'message.accepted' ? record.value.deliveries : record.kind === 'delivery.undeliverable' ? record.value : [];
+      for (const delivery of deliveries ?? []) if (delivery.state === 'undeliverable') undeliverable.add(`${delivery.seq}:${delivery.recipient}`);
+    }
+    return { messages: records.filter(r => r.kind === 'message.accepted').map(r => r.value.message), undeliverable: undeliverable.size };
+  }
+  async function messages(run: Run) { return (await messageState(run)).messages; }
   async function runSummary(run: Run, session?: string) {
-    const all = await messages(run); const inbox = all.filter(m => m.to === 'orchestrator' || m.to === '*' && m.from !== 'orchestrator');
-    return { ...summary(run, session), unreadForOrchestrator: inbox.filter(m => m.seq > (run.readSeq[session ?? 'anonymous'] ?? 0)).length, messages: all.slice(-20).map(m => ({ ...m, text: truncate(m.text, 300) })) };
+    const history = await messageState(run), all = history.messages;
+    const inbox = all.filter(m => m.to === 'orchestrator' || m.to === '*' && m.from !== 'orchestrator');
+    const scheduler = manager.scheduler.snapshot();
+    const admission = scheduler.queued.filter(slots => slots[0]?.runId === run.id && slots[0]?.comms).map(slots => {
+      return { agents: slots.map(s => s.name), blockedBy: manager.scheduler.blockingSlots(slots).map(s => ({ runId: s.runId, name: s.name, backend: s.backend, status: manager.runs.get(s.runId)?.agents.find(a => a.id === s.id)?.status })) };
+    });
+    const preview = (m: any) => ({ ...m, text: truncate(m.text, 300) });
+    return { ...summary(run, session), unreadForOrchestrator: inbox.filter(m => m.seq > (run.readSeq[session ?? 'anonymous'] ?? 0)).length, latestMessages: inbox.slice(-5).map(preview), messages: all.slice(-20).map(preview), undeliverableMessages: history.undeliverable, admission };
   }
   async function orch(name: string, input: any, ui = false): Promise<any> {
     validateTool(name, input, 'orchestrator');
@@ -91,7 +108,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       }
       observedSeq = manager.hubSeq;
       const view = await runSummary(run!, input.orchestratorSessionId);
-      result = { status: run!.status, phase: run!.phase, phases: view.phases, ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, latestMessages: view.messages.slice(-5), error: run!.error, ...(woke ? { woke } : {}) };
+      result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, error: run!.error, ...(woke ? { woke } : {}) };
     } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) }; }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';

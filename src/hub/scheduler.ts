@@ -55,7 +55,8 @@ export class Scheduler {
     });
   }
   pause(runId: string, paused: boolean) { paused ? this.paused.add(runId) : this.paused.delete(runId); this.drain(); }
-  blockers(slots: Slot[]) { return [...this.held.values()].filter(s => s.comms && (s.runId === slots[0].runId || slots.some(t => t.backend === s.backend) || this.held.size >= this.config.global - this.config.reserve)).map(s => s.name); }
+  blockingSlots(slots: Slot[]) { return [...this.held.values()].filter(s => s.comms && (s.runId === slots[0].runId || slots.some(t => t.backend === s.backend) || this.held.size >= this.config.global - this.config.reserve)); }
+  blockers(slots: Slot[]) { return this.blockingSlots(slots).map(s => s.name); }
   snapshot() { return { held: [...this.held.values()], queued: this.queue.map(e => e.slots), paused: [...this.paused] }; }
   rateLimited(backend: Backend, now = Date.now()) {
     const current = this.capacity(backend, now);
