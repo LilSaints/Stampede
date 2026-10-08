@@ -11,6 +11,7 @@ const terminal = new Set(['done', 'failed', 'cancelled', 'skipped']);
 
 export class MessageBus extends EventEmitter {
   readonly messages: Message[] = [];
+  private bySeq = new Map<number, Message>();
   readonly deliveries: Delivery[] = [];
   readonly entries: BoardEntry[] = [];
   private seq = 0;
@@ -52,7 +53,7 @@ export class MessageBus extends EventEmitter {
       const deliveries: Delivery[] = recipients.map(recipient => ({ seq: message.seq, recipient, state: terminal.has(this.peers.get(recipient)?.status ?? '') || this.peers.get(recipient)?.markedDone ? 'undeliverable' : 'pending', redelivered: 0 }));
       // The append must be durable before any recipient or sender observes it.
       await this.persist('message.accepted', { message, deliveries });
-      this.messages.push(message); this.deliveries.push(...deliveries); this.counts.set(from, (this.counts.get(from) ?? 0) + 1);
+      this.messages.push(message); this.bySeq.set(message.seq, message); this.deliveries.push(...deliveries); this.counts.set(from, (this.counts.get(from) ?? 0) + 1);
       this.emit('change'); this.emit('message', message, deliveries);
       return { seq: message.seq, deliveredTo: deliveries.filter(d => d.state === 'pending' && this.peers.get(d.recipient)?.status !== 'idle').map(d => d.recipient), queuedFor: deliveries.filter(d => d.state === 'pending' && this.peers.get(d.recipient)?.status === 'idle').map(d => d.recipient), undeliverable: deliveries.filter(d => d.state === 'undeliverable').map(d => d.recipient) };
     }); } finally { this.enqueuing--; this.emit('change'); }
@@ -65,7 +66,7 @@ export class MessageBus extends EventEmitter {
       let bytes = 0;
       for (const delivery of this.deliveries) {
         if (delivery.recipient !== recipient || delivery.state !== 'pending') continue;
-        const message = this.messages.find(m => m.seq === delivery.seq)!;
+        const message = this.bySeq.get(delivery.seq)!;
         const size = Buffer.byteLength(JSON.stringify(message));
         if (batch.length >= Math.max(1, Math.min(50, max)) || bytes + size > maxBytes) break;
         batch.push(delivery); bytes += size;
@@ -76,7 +77,7 @@ export class MessageBus extends EventEmitter {
       await this.persist('delivery.claimed', changes);
       changes.forEach((d, i) => Object.assign(batch[i], d)); this.open.set(recipient, claimId);
       this.emit('change');
-      return { claimId, messages: batch.map(d => this.messages.find(m => m.seq === d.seq)!), deliveries: changes, remaining: this.pending(recipient) };
+      return { claimId, messages: batch.map(d => this.bySeq.get(d.seq)!), deliveries: changes, remaining: this.pending(recipient) };
     });
   }
   ack(recipient: string, claimId: string) {
@@ -134,7 +135,7 @@ export class MessageBus extends EventEmitter {
       this.once('change', wake);
       try {
         const pending = this.deliveries.filter(d => d.recipient === recipient && d.state === 'pending');
-        if (!from || pending.some(d => this.messages.find(m => m.seq === d.seq)?.from === from)) {
+        if (!from || pending.some(d => this.bySeq.get(d.seq)?.from === from)) {
           const claimed = await this.claim(recipient, 'wait', turnN);
           if (claimed.messages.length) return { ...claimed, timedOut: false };
         }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { codexArgv } from '../../src/backends/codex.js';
+import { claudeArgv } from '../../src/backends/claude.js';
 import { launchTurn, workerEnv } from '../../src/backends/procs.js';
 import type { AgentLaunch } from '../../src/backends/adapter.js';
 function launch(dir: string): AgentLaunch { return { backend: 'codex', binary: process.execPath, entry: path.resolve('test/fake-backends/cli.mjs'), cwd: dir, access: 'read-only', model: 'fixture', effort: 'low', mcpPath: '', settingsPath: '', contract: 'fixture', comms: false, hubUrl: '', cliEntry: '', windowsSandbox: 'elevated', timeoutMs: 3000, stdoutPath: path.join(dir, 'stdout.jsonl'), stderrPath: path.join(dir, 'stderr.txt') }; }
@@ -15,6 +16,16 @@ test('Codex resume preserves all options before the resume tail', () => {
   assert.ok(start.indexOf('windows.sandbox="elevated"') > start.indexOf('--ignore-user-config'));
   assert.ok(start.includes('mcp_servers.stampede.default_tools_approval_mode="approve"'));
   assert.ok(start.includes('approval_policy="never"'));
+  assert.ok(!codexArgv({ ...a, developerInstructionsFlag: false }).some(arg => arg.startsWith('developer_instructions=')));
+});
+test('Claude read-only coordination permits messaging without file edits or shell tools', () => {
+  const argv = claudeArgv({ ...launch('.'), backend: 'claude', comms: true });
+  assert.equal(argv[argv.indexOf('--permission-mode') + 1], 'default');
+  assert.ok(argv.includes('mcp__stampede__*'));
+  const denied = argv.slice(argv.indexOf('--disallowedTools') + 1);
+  for (const tool of ['Edit', 'Write', 'Bash', 'PowerShell', 'Agent', 'Task']) assert.ok(denied.includes(tool));
+  assert.ok(!claudeArgv({ ...launch('.'), comms: true, persistNonComms: false }).includes('--no-session-persistence'));
+  assert.ok(claudeArgv({ ...launch('.'), comms: false, persistNonComms: false }).includes('--no-session-persistence'));
 });
 test('shell-free backend receives a long UTF-8 prompt over stdin and preserves resume session', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede-adapter-'));
@@ -26,6 +37,8 @@ test('shell-free backend receives a long UTF-8 prompt over stdin and preserves r
     const next = await launchTurn(a, 'continued', { resumeSessionId: first.sessionId }).done;
     assert.equal(next.sessionId, first.sessionId);
     assert.equal(next.text, 'continued');
+    const fallback = await launchTurn({ ...a, developerInstructionsFlag: false }, 'prompt').done;
+    assert.equal(fallback.text, '<stampede-contract>\nfixture\n</stampede-contract>\nprompt');
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 test('worker environment strips desktop identity and hub home; token logs are redacted', async () => {

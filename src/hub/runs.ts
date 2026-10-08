@@ -29,7 +29,7 @@ interface AgentContext {
   agent: Agent; opts: AgentOpts; prompt: string; abort: AbortController; token: string; tokenHash: string; done: Promise<unknown>; resolve: (value: unknown) => void;
   task?: Promise<void>; handle?: TurnHandle; release?: (id?: string) => void; tainted: boolean; resumeScheduled: boolean; launch?: AgentLaunch;
   key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean;
-  finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean;
+  finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord }
 export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; limits?: Partial<Config['limits']> }
@@ -47,7 +47,7 @@ export class RunManager extends EventEmitter {
   private eventMutex = new Mutex();
   constructor(readonly store: Store, readonly config: Config, readonly backends: Record<'claude' | 'codex', BackendInfo>, readonly cliEntry: string) {
     super(); const s = config.scheduler;
-    this.scheduler = new Scheduler({ global: s.maxConcurrent, perRun: s.perRun, claude: s.claude.maxConcurrent, codex: s.codex.maxConcurrent, reserve: s.nonCommsReserve, admissionMaxMs: s.admissionMaxMs });
+    this.scheduler = new Scheduler({ global: s.maxConcurrent, perRun: s.perRun, claude: s.claude.maxConcurrent, codex: backends.codex.capabilities.concurrentHomeSafe === false ? 1 : s.codex.maxConcurrent, reserve: s.nonCommsReserve, admissionMaxMs: s.admissionMaxMs });
   }
   async restore() {
     await this.store.initialize();
@@ -70,6 +70,7 @@ export class RunManager extends EventEmitter {
   }
   async event(run: Run, type: string, data: any = {}) {
     return this.eventMutex.run(async () => {
+      if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
       if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
@@ -105,6 +106,7 @@ export class RunManager extends EventEmitter {
     const run: Run = { id, name: parsed.meta.name, cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
+    run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures };
     const limits = effective.scheduler;
     this.scheduler.configureRun(id, { global: limits.maxConcurrent, perRun: limits.perRun, claude: limits.claude.maxConcurrent, codex: limits.codex.maxConcurrent, reserve: limits.nonCommsReserve, admissionMaxMs: limits.admissionMaxMs });
     if (resumeOf) await execution.cache.load(this.store.runDir(resumeOf));
@@ -112,7 +114,7 @@ export class RunManager extends EventEmitter {
     await this.event(run, 'run.status', { status: run.status });
     execution.task = execution.execute(source).finally(() => { this.active.delete(id); this.scheduler.forgetRun(id); });
     void execution.task.catch(error => { this.emit('internalError', error); });
-    return { runId: id, status: run.status, scriptPath, cacheHits: 0 };
+    return { runId: id, status: run.status, scriptPath, cacheHits: 0, liveCalls: 0, ...run.cacheReport };
   }
   async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string }) {
     const old = this.get(id); if (!runTerminal(old.status)) throw new Error('only terminal runs may be resumed');
@@ -146,6 +148,19 @@ export class RunExecution {
       if (kind === 'delivery.handed') await this.event('message.delivered', value);
     });
     this.bus.on('message', (message, deliveries) => { run.counters.messages++; for (const d of deliveries) { const c = this.contexts.get(d.recipient); if (c) c.tainted = true; } void this.event('message.accepted', message).catch(e => this.fail(e)); this.scheduleResumes(); });
+    this.bus.on('budget', from => { void this.notifyBudget('messages', from).catch(e => this.fail(e)); });
+  }
+  private async notifyBudget(kind: string, agent: string) {
+    await this.bus.send('system', 'orchestrator', `${kind} limit reached for ${agent}; pending messages remain available.`, undefined, 'system');
+    await this.event('budget.exhausted', { kind, agent });
+  }
+  private async backendUnavailable(backend: 'claude' | 'codex', error: { kind: string; message: string }) {
+    if (this.unavailable.has(backend)) return;
+    this.unavailable.add(backend);
+    this.manager.scheduler.rejectBackend(this.run.id, backend, Object.assign(new Error(error.message), { kind: error.kind }));
+    const hint = error.kind === 'auth' ? `auth failed for ${backend}: run '${backend === 'claude' ? 'claude auth login' : 'codex login'}'` : `${backend} could not start: ${error.message}`;
+    await this.bus.send('system', 'orchestrator', hint.slice(0, 1000), undefined, 'system');
+    await this.event('backend.unavailable', { backend, error, hint });
   }
   event(type: string, value: any = {}) { return this.manager.event(this.run, type, value); }
   async fail(error: Error) { if (!runTerminal(this.run.status)) { this.run.error = { message: error.message, stack: error.stack }; await this.cancel('failed'); } }
@@ -161,7 +176,8 @@ export class RunExecution {
     } catch (error) {
       if (!runTerminal(this.run.status)) { this.run.error = { message: (error as Error).message, stack: (error as Error).stack }; await this.cancel('failed'); }
     } finally {
-      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error });
+      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
+      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'run.json'), this.run);
       for (const c of this.contexts.values()) { c.token = ''; for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.agentDir(c.agent), file), { force: true }); }
     }
   }
@@ -193,11 +209,17 @@ export class RunExecution {
     if (!this.budgetAvailable()) throw new Error('budget exhausted');
     const backend = opts.backend ?? this.run.defaultBackend;
     if (!['claude', 'codex'].includes(backend)) throw new Error('invalid backend');
+    if (this.unavailable.has(backend)) throw new Error(`${backend} is unavailable for this run`);
     if (opts.schema) { validateSchema(opts.schema); if (backend === 'codex') codexSchema(opts.schema); }
     if (opts.access && !['read-only', 'edit', 'full'].includes(opts.access)) throw new Error('invalid access level');
     if (opts.access === 'full' && !this.config.allowFullAccess) throw new Error("access 'full' disabled by config");
+    if (backend === 'codex' && (opts.access === 'edit' || opts.isolation === 'worktree' && opts.access !== 'read-only') && this.manager.backends.codex.capabilities.workspaceWriteReady === false) throw new Error('Codex workspace-write sandbox is not ready; run stampede doctor');
     if (opts.isolation && !['shared', 'worktree'].includes(opts.isolation)) throw new Error('invalid isolation');
     if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0 || opts.timeoutMs > this.config.limits.turnTimeoutMs)) throw new Error('timeoutMs must be positive and no greater than the configured limit');
+    if (opts.maxResumes !== undefined && (!Number.isInteger(opts.maxResumes) || opts.maxResumes < 0 || opts.maxResumes > this.config.limits.maxResumesPerAgent)) throw new Error('maxResumes must be an integer within the configured limit');
+    if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
+    if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
+    if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
     if (opts.name && (!/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     const model = opts.model ?? this.config.codex.defaultModel;
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
@@ -213,6 +235,7 @@ export class RunExecution {
     const access = opts.access ?? (opts.isolation === 'worktree' ? 'edit' : 'read-only');
     const isolation = opts.isolation ?? (access === 'read-only' ? 'shared' : 'worktree');
     const enabled = Boolean(teamId || opts.comms);
+    if (backend === 'codex' && enabled && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('Codex messaging is not qualified for this CLI version; run stampede doctor and qualify the updated backend');
     const canMessage = typeof opts.comms === 'object' ? opts.comms.canMessage ?? '*' : '*';
     const agent: Agent = { id: `agt_${ulid()}`, runId: this.run.id, name, label: opts.label ?? name, role: opts.role, phase: opts.phase ?? this.run.phase, backend, mode: 'oneshot', comms: { enabled, canMessage }, access, workspace: { kind: isolation, path: path.resolve(this.run.cwd, opts.cwd ?? '.') }, status: 'queued', markedDone: false, usage: zeroUsage(), resumes: 0, stopBlocks: 0, lastActivityAt: now(), turns: [], teamId };
     let resolve!: (value: unknown) => void; const done = new Promise(r => { resolve = r; });
@@ -242,7 +265,9 @@ export class RunExecution {
     if (!c.cacheable) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
   }
   async dispatch(c: AgentContext, preReserved?: (id?: string) => void) {
+    c.release = preReserved;
     try {
+      if (this.unavailable.has(c.agent.backend)) throw new Error(`${c.agent.backend} is unavailable for this run`);
       c.release = preReserved ?? await this.manager.scheduler.acquire([this.slot(c)], c.abort.signal);
       if (this.abort.signal.aborted || c.abort.signal.aborted) { await this.finish(c, 'cancelled'); return; }
       if (!this.budgetAvailable()) { c.agent.error = { kind: 'budget', message: 'budget exhausted' }; await this.finish(c, 'failed'); return; }
@@ -256,8 +281,8 @@ export class RunExecution {
       this.run.liveCalls++;
       await this.turn(c, c.prompt, false);
     } catch (error) {
-      if (error instanceof AdmissionError) { c.agent.error = { kind: error.kind, message: error.message, blockedBy: error.blockedBy }; await this.event('team.admission_blocked', { agents: [c.agent.name], blockedBy: error.blockedBy }); }
-      else c.agent.error = { kind: 'spawn', message: (error as Error).message };
+      if (error instanceof AdmissionError) { c.agent.error = { kind: error.kind, message: error.message, blockedBy: error.blockedBy, waitedMs: error.waitedMs }; await this.event('team.admission_blocked', { agents: [c.agent.name], blockedBy: error.blockedBy, waitedMs: error.waitedMs }); }
+      else { c.agent.error = { kind: (error as any).kind ?? 'spawn', message: (error as Error).message }; if (!c.abort.signal.aborted) await this.backendUnavailable(c.agent.backend, c.agent.error); }
       if (!agentTerminal(c.agent.status)) await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed');
     } finally {
       if (agentTerminal(c.agent.status)) { c.release?.(c.agent.id); c.release = undefined; }
@@ -276,7 +301,7 @@ export class RunExecution {
     const agentType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks };
   }
   private async turn(c: AgentContext, initialPrompt: string, resume: boolean) {
     const a = c.agent;
@@ -328,7 +353,7 @@ export class RunExecution {
         }
       }
       const error = outcome.error ?? { kind: 'unknown', message: 'backend returned no result' }; a.error = error;
-      if (['auth', 'spawn'].includes(error.kind)) { this.unavailable.add(a.backend); await this.event('backend.unavailable', { backend: a.backend, error }); }
+      if (['auth', 'spawn'].includes(error.kind)) await this.backendUnavailable(a.backend, error);
       const maxAttempts = ['rate_limit', 'overloaded'].includes(error.kind) ? 6 : ['crash', 'unknown'].includes(error.kind) ? 3 : ['schema', 'timeout'].includes(error.kind) ? 2 : 1;
       if (++attempts >= maxAttempts) { await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed'); return; }
       if (['rate_limit', 'overloaded'].includes(error.kind)) this.manager.scheduler.rateLimited(a.backend);
@@ -358,7 +383,11 @@ export class RunExecution {
     if (this.run.status !== 'running' || this.draining || !this.budgetAvailable()) return;
     for (const c of this.contexts.values()) {
       const a = c.agent;
-      if (a.status !== 'idle' || a.markedDone || c.resumeScheduled || !this.bus.pending(a.name) || a.resumes >= (c.opts.maxResumes ?? this.config.limits.maxResumesPerAgent)) continue;
+      if (a.status !== 'idle' || a.markedDone || c.resumeScheduled || !this.bus.pending(a.name)) continue;
+      if (a.resumes >= (c.opts.maxResumes ?? this.config.limits.maxResumesPerAgent)) {
+        if (!c.resumeLimitNotified) { c.resumeLimitNotified = true; void this.notifyBudget('resumes', a.name).catch(e => this.fail(e)); }
+        continue;
+      }
       c.resumeScheduled = true;
       c.task = (async () => {
         await sleep(this.config.delivery.resumeDebounceMs, c.abort.signal);
@@ -434,7 +463,7 @@ export class RunExecution {
     }
     const admission = this.manager.scheduler.acquire(contexts.map(c => this.slot(c)), this.abort.signal);
     void admission.then(release => { for (const c of contexts) { c.task = this.dispatch(c, release); void c.task.catch(e => this.fail(e)); } }).catch(async error => {
-      for (const c of contexts) { c.agent.error = { kind: error instanceof AdmissionError ? 'admission_timeout' : 'cancelled', message: error.message, blockedBy: error.blockedBy }; await this.finish(c, error instanceof AdmissionError ? 'failed' : 'cancelled'); }
+      for (const c of contexts) { c.agent.error = { kind: error instanceof AdmissionError ? 'admission_timeout' : error.kind ?? 'cancelled', message: error.message, blockedBy: error.blockedBy, waitedMs: error.waitedMs }; await this.finish(c, error instanceof AdmissionError || error.kind ? 'failed' : 'cancelled'); }
       if (error instanceof AdmissionError) await this.event('team.admission_blocked', { names, blockedBy: error.blockedBy });
     });
     return { id, names };
@@ -449,7 +478,9 @@ export class RunExecution {
     if (method === 'stop') { await this.stopMembers(team.names); await this.recordTeam(team); return; }
     if (!['untilQuiet', 'untilDone'].includes(method)) throw new Error('unknown team method');
     const maxMs = Math.min(params.opts?.maxMs ?? this.config.limits.teamMaxMs, this.config.limits.teamMaxMs), idleMs = params.opts?.idleMs ?? 30000;
+    const maxMessages = Math.min(params.opts?.maxMessages ?? this.config.limits.teamMaxMessages, this.config.limits.teamMaxMessages);
     if (!Number.isFinite(maxMs) || maxMs < 0 || !Number.isFinite(idleMs) || idleMs < 0) throw new Error('invalid team observation duration');
+    if (!Number.isInteger(maxMessages) || maxMessages < 0) throw new Error('invalid team message limit');
     const start = Date.now(); let quietSince: number | undefined;
     for (;;) {
       const admissionFailed = members.filter(c => c.agent.error?.kind === 'admission_timeout').map(c => c.agent.name);
@@ -459,7 +490,7 @@ export class RunExecution {
       if (Date.now() - start >= maxMs) return { reason: 'max-ms', admissionFailed: [], ...(method === 'untilDone' ? { notTerminal } : {}) };
       if (method === 'untilQuiet') {
         if (!this.budgetAvailable()) return { reason: 'budget', admissionFailed: [] };
-        if (this.bus.messages.filter(m => team.names.includes(m.from)).length >= (params.opts?.maxMessages ?? this.config.limits.teamMaxMessages)) return { reason: 'max-messages', admissionFailed: [] };
+        if (this.bus.messages.filter(m => team.names.includes(m.from)).length >= maxMessages) return { reason: 'max-messages', admissionFailed: [] };
         const quiet = !members.some(c => ['queued', 'starting', 'running', 'resuming'].includes(c.agent.status) || c.resumeScheduled) && this.bus.uncommitted(team.names) === 0;
         quietSince = quiet ? quietSince ?? Date.now() : undefined;
         if (quietSince !== undefined && Date.now() - quietSince >= idleMs) {

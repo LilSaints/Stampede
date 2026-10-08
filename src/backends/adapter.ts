@@ -9,9 +9,9 @@ export interface AgentLaunch {
   mcpPath: string; settingsPath: string; contract: string; comms: boolean;
   hubUrl: string; token?: string; cliEntry: string;
   windowsSandbox: string; timeoutMs: number; stdoutPath: string; stderrPath: string;
-  inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number;
+  inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number; persistNonComms?: boolean;
   disableHooks?: boolean; extraEnv?: Record<string, string>; mcpEnv?: Record<string, string>;
-  codexHookCommand?: string; trustCodexHooks?: boolean;
+  codexHookCommand?: string; trustCodexHooks?: boolean; developerInstructionsFlag?: boolean;
 }
 export interface TurnOutcome { ok: boolean; sessionId?: string; text?: string; structured?: unknown; usage: Usage; error?: { kind: ErrorKind; message: string }; code: number | null; signal?: string | null }
 export interface TurnHandle { done: Promise<TurnOutcome>; kill(): Promise<void>; pid?: number }

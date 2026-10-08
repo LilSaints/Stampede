@@ -44,7 +44,10 @@ export async function initialize(home: string, yes = false) {
 }
 export async function doctor(home: string) {
   const config = await loadConfig(home);
-  const backends = await probeBackends(config);
+  const security = new Security();
+  let backends;
+  try { await security.start(home, config.security.ancestryCheck); backends = await probeBackends(config, home); }
+  finally { await security.close(); }
   const gitVersion = await capture('git', ['--version']).catch(error => ({ code: -1, stdout: '', stderr: error.message }));
   const descriptor = await readJson<{ port: number; version: string }>(path.join(home, 'hub.json'));
   let hub: unknown = { ok: false, error: 'hub not running' };
@@ -56,9 +59,9 @@ export async function doctor(home: string) {
     } catch (error) { hub = { ok: false, error: (error as Error).message }; }
   }
   const plugins = backends.claude.binary ? await capture(backends.claude.binary, ['plugin', 'list', '--json']).catch(() => undefined) : undefined;
-  return { version: VERSION, node: { version: process.version, supported: Number(process.versions.node.split('.')[0]) >= 22 }, home, git: gitVersion.code === 0 ? gitVersion.stdout.trim() : gitVersion.stderr, backends, hub,
+  return { version: VERSION, node: { version: process.version, supported: Number(process.versions.node.split('.')[0]) >= 22 }, home, security: { aclVerified: security.aclVerified, warnings: security.warnings }, git: gitVersion.code === 0 ? gitVersion.stdout.trim() : gitVersion.stderr, backends, hub,
     plugin: { installed: plugins?.code === 0 ? /"stampede@stampede"/.test(plugins.stdout) : null, connection: 'Use the Stampede MCP stampede_doctor tool to verify this session connects.' },
-    windowsSandbox: { implementation: config.codex.windowsSandbox, readiness: 'not probed by this read-only check' } };
+    windowsSandbox: { implementation: config.codex.windowsSandbox, ready: backends.codex.capabilities.workspaceWriteReady ?? null, error: backends.codex.capabilities.sandboxError } };
 }
 /** Remove only expired terminal run artifacts; worktrees always live elsewhere. */
 export async function collectRuns(store: Store, config: Config, now = Date.now()) {

@@ -8,6 +8,7 @@ const resume = argv.indexOf(codex ? 'resume' : '--resume');
 const id = resume >= 0 ? argv[resume + 1] : randomUUID();
 const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 if (prompt === 'crash') { process.stderr.write('fixture crash'); process.exit(1); }
+if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 authentication failed' } }); process.exit(1); }
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt.startsWith('fixture:team')) {
   const tool = async (name, input) => {
@@ -18,6 +19,7 @@ if (prompt.startsWith('fixture:team')) {
   await tool('post_finding', { title: prompt, body: 'fixture finding', topic: 'test' });
   await tool('send_message', { to: 'orchestrator', text: 'fixture complete' });
   await tool('mark_done', {});
+  if (prompt === 'fixture:team-delayed') await new Promise(resolve => setTimeout(resolve, 600));
 }
 const output = process.env.STAMPEDE_FIXTURE_RESULT ?? prompt;
 if (codex) {

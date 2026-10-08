@@ -14,7 +14,7 @@ export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';
   comms: { enabled: boolean; canMessage: string[] | '*' }; access: 'read-only' | 'edit' | 'full'; workspace: Workspace;
   status: AgentStatus; sessionId?: string; markedDone: boolean; result?: unknown; resultStoredAtTurn?: number; teamId?: string;
-  usage: Usage; resumes: number; stopBlocks: number; lastActivityAt: string; error?: { kind: string; message: string; blockedBy?: string[] };
+  usage: Usage; resumes: number; stopBlocks: number; lastActivityAt: string; error?: { kind: string; message: string; blockedBy?: string[]; waitedMs?: number };
   turns: { n: number; kind: string; startedAt: string; endedAt?: string; outcome?: TurnOutcome; stdoutPath: string; stderrPath: string }[];
 }
 export interface Run {
@@ -24,5 +24,6 @@ export interface Run {
   counters: { agentsStarted: number; agentsRunning: number; messages: number }; orchestratorSessionId?: string;
   agents: Agent[]; log: string[]; phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
+  cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[] };
   notifications?: { hubSeq: number; runId: string; type: string; at: string; data: any }[];
 }

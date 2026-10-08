@@ -33,6 +33,12 @@ export class Scheduler {
   }
   configureRun(runId: string, limits: SchedulerConfig) { this.runLimits.set(runId, limits); }
   forgetRun(runId: string) { this.runLimits.delete(runId); this.paused.delete(runId); }
+  rejectBackend(runId: string, backend: Backend, error: Error) {
+    const rejected = this.queue.filter(e => e.slots.some(s => s.runId === runId && s.backend === backend));
+    this.queue = this.queue.filter(e => !rejected.includes(e));
+    for (const entry of rejected) { entry.cleanup(); entry.reject(error); }
+    this.drain();
+  }
   acquire(slots: Slot[], signal?: AbortSignal): Promise<(id?: string) => void> {
     this.validate(slots);
     if (slots.some(s => this.held.has(s.id) || this.queue.some(e => e.slots.some(t => t.id === s.id)))) throw new Error('duplicate scheduler slot');

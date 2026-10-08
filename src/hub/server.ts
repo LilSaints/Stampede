@@ -19,7 +19,7 @@ const truncate = (value: string, max: number) => value.length > max ? value.slic
 export function summary(run: Run, session?: string) {
   return { runId: run.id, name: run.name, status: run.status, startedAt: run.startedAt, endedAt: run.endedAt, orchestratorSessionId: run.orchestratorSessionId,
     phases: run.phases.map(p => ({ ...p, counts: Object.fromEntries(['queued', 'running', 'waiting', 'idle', 'done', 'failed'].map(s => [s, run.agents.filter(a => a.phase === p.title && a.status === s).length])) })),
-    agents: run.agents.map(a => ({ name: a.name, backend: a.backend, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + (a.backend === 'codex' ? a.usage.reasoningTokens : 0), lastActivity: a.lastActivityAt, error: a.error })),
+    agents: run.agents.map(a => ({ name: a.name, backend: a.backend, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + (a.backend === 'codex' ? a.usage.reasoningTokens : 0), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
     budget: { spent: run.budget.spentTokens, total: run.budget.totalTokens }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
     resultPath: path.join(path.dirname(run.scriptPath), 'result.json'), error: run.error, notifications: run.notifications ?? [] };
 }
@@ -44,7 +44,8 @@ export async function startHub(options: { home: string; config: Config; cliEntry
   const identity = await security.identity(process.pid);
   await lock.writeFile(JSON.stringify({ pid: process.pid, startFileTime: identity?.startFileTime })); await lock.sync(); await lock.close();
   const store = new Store(home);
-  const manager = new RunManager(store, config, options.backends ?? await probeBackends(config), options.cliEntry);
+  const manager = new RunManager(store, config, options.backends ?? await probeBackends(config, home), options.cliEntry);
+  manager.on('internalError', error => { void store.appendLog(path.join(home, 'hub.log'), { at: new Date().toISOString(), level: 'error', message: String(error) }).catch(() => {}); });
   manager.processStarted = async (pid, agent) => {
     const identity = await security.track(pid);
     if (identity) await store.write(path.join(store.runDir(agent.runId), 'agents', agent.id, 'pids.json'), identity);
@@ -91,7 +92,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       observedSeq = manager.hubSeq;
       const view = await runSummary(run!, input.orchestratorSessionId);
       result = { status: run!.status, phase: run!.phase, phases: view.phases, ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, latestMessages: view.messages.slice(-5), error: run!.error, ...(woke ? { woke } : {}) };
-    } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json') }; }
+    } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) }; }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';
       const inbox = (await messages(run!)).filter(m => (m.to === 'orchestrator' || m.to === '*' && m.from !== 'orchestrator') && (input.unreadOnly === false || m.seq > (run!.readSeq[key] ?? 0))).slice(0, input.max ?? 20);

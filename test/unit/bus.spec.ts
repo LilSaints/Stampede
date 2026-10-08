@@ -62,11 +62,13 @@ test('1000 seeded delivery schedules preserve order and commit every accepted me
     const bus = fixture(() => now);
     const names = [...bus.peers.keys()];
     const last = new Map<string, number>();
-    for (let i = 0; i < 50; i++) {
-      const from = names[Math.floor(random() * 4)];
+    const senders = names.flatMap(name => Array(50).fill(name));
+    for (let i = senders.length - 1; i > 0; i--) { const j = Math.floor(random() * (i + 1)); [senders[i], senders[j]] = [senders[j], senders[i]]; }
+    for (let i = 0; i < senders.length; i++) {
+      const from = senders[i];
       await bus.send(from, '*', `${seed}:${i}`);
       for (const to of names) if (random() < 0.5) {
-        const batch = await bus.claim(to, 'read', 1, 1 + Math.floor(random() * 10));
+        const batch = await bus.claim(to, ['read', 'hook', 'wait', 'resume'][Math.floor(random() * 4)], 1, 1 + Math.floor(random() * 10));
         if (!batch.claimId) continue;
         if (random() < 0.1) { now += 101; await bus.expire(); continue; }
         for (const message of batch.messages) { assert.ok(message.seq > (last.get(to) ?? 0)); last.set(to, message.seq); }
@@ -82,6 +84,6 @@ test('1000 seeded delivery schedules preserve order and commit every accepted me
       await bus.endTurn(name, 1, true);
     }
     assert.equal(bus.uncommitted(names), 0, `seed ${seed}`);
-    assert.equal(bus.deliveries.filter(d => names.includes(d.recipient)).length, 150);
+    assert.equal(bus.deliveries.filter(d => names.includes(d.recipient)).length, 600);
   }
 });

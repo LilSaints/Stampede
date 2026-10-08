@@ -39,3 +39,15 @@ test('mixed gangs acquire atomically and pause/cancel holds no partial slots', a
   await assert.rejects(waiting, /cancelled/);
   assert.equal(scheduler.snapshot().queued.length, 0);
 });
+test('project caps limit only that run and preserve cross-run throughput', async () => {
+  const scheduler = new Scheduler(config);
+  scheduler.configureRun('limited', { ...config, global: 2, perRun: 2, codex: 2 });
+  assert.throws(() => scheduler.acquire(slots(2, 'limited')), /does not fit/);
+  const first = await scheduler.acquire([{ ...slots(1, 'limited', false)[0], id: 'first' }]);
+  const second = await scheduler.acquire([{ ...slots(1, 'limited', false)[0], id: 'second' }]);
+  const waiting = scheduler.acquire([{ ...slots(1, 'limited', false)[0], id: 'third' }]);
+  const other = await scheduler.acquire(slots(1, 'other', false));
+  assert.equal(scheduler.snapshot().held.length, 3);
+  assert.equal(scheduler.snapshot().queued.length, 1);
+  first(); const third = await waiting; second(); third(); other();
+});

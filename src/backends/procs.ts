@@ -29,6 +29,7 @@ export async function killTree(child: ChildProcess) {
   }
 }
 export function launchTurn(a: AgentLaunch, prompt: string, options: { resumeSessionId?: string; onEvent?: (event: any) => void; onSpawn?: (pid: number) => Promise<void>; onHanded?: () => Promise<void> } = {}): TurnHandle {
+  if (a.backend === 'codex' && a.developerInstructionsFlag === false) prompt = `<stampede-contract>\n${a.contract}\n</stampede-contract>\n${prompt}`;
   const argv = a.backend === 'claude' ? claudeArgv(a, options.resumeSessionId) : codexArgv(a, { resumeThreadId: options.resumeSessionId });
   const env = workerEnv({ ...a.extraEnv, STAMPEDE_HUB_URL: a.hubUrl, ...(a.token ? { STAMPEDE_AGENT_TOKEN: a.token } : {}), MCP_TOOL_TIMEOUT: '120000' });
   const secrets = Object.entries(env).filter(([key]) => /(KEY|TOKEN|SECRET|PASSWORD)/i.test(key)).map(([, value]) => value!).filter(Boolean);

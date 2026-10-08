@@ -21,7 +21,11 @@ export function defaults() {
   };
 }
 export type Config = ReturnType<typeof defaults>;
-export function stampedeHome() { return path.resolve(process.env.STAMPEDE_HOME?.trim() || path.join(os.homedir(), '.stampede')); }
+export function stampedeHome() {
+  const configured = process.env.STAMPEDE_PLUGIN_HOME?.trim() || process.env.STAMPEDE_HOME?.trim();
+  if (configured?.includes('${')) throw new Error('unresolved Stampede plugin home option');
+  return path.resolve(configured || path.join(os.homedir(), '.stampede'));
+}
 function merge(base: any, extra: any, location = ''): any {
   if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error(`invalid configuration at ${location || 'root'}`);
   const output = structuredClone(base);

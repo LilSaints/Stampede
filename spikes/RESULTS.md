@@ -124,3 +124,40 @@ node spikes/s23-windows-sandbox.mjs spikes/artifacts/s23-rerun
 The session harness removes invoking-desktop identity/IPC/permission-profile environment variables before starting its separately configured workers; authentication locations are preserved. It also removes the inherited `PSModulePath` so Windows PowerShell can locate its own modules. The initial Claude harness used `--bare`, which intentionally disables OAuth/keychain login; the corrected harness omits it and keeps settings/MCP configuration isolated instead.
 
 Diagnostic attempts are retained alongside the final evidence. A completed harness run is not itself a pass for every assumption; use the observations and verdicts above. There is no product implementation in these probes.
+
+## Final capability and host matrix — 2026-10-08
+
+| Spike | Evidence or selected fallback |
+|---|---|
+| S-1/S-2 | Passed real Claude hook/context/env and 45-second MCP wait probes. |
+| S-3 | Per-call Codex hooks were not usable in the tested forms. D3/D5 polling and idle resume are selected; hook delivery is not claimed. |
+| S-4/S-5 | Real Codex per-call MCP configuration and developer instructions passed. Unqualified versions use prompt contracts and reject unqualified MCP coordination. |
+| S-6 | Both file and `@file` arguments were rejected as invalid JSON. Inline schema with the 24,000-character guard is selected. |
+| S-7 | Eight concurrent conversations × three waves passed. Unqualified versions are limited to one process. |
+| S-8 | Normal and killed real streams were observed. Auth, timeout and failure paths also have fake-backend coverage. Real rate-limit/overload/auth event variants were not deliberately induced; exit status and stderr classification remain the conservative fallback. |
+| S-9 | gpt-6-astra accepted low, medium, high, xhigh and max; each returned valid constant JSON. No effort remapping is needed for 0.159.2. |
+| S-10 | Strict normalization is always selected; 200 optional-property/ref round trips pass, unsupported ambiguous unions reject before launch, and actual schema pipeline calls pass. Raw server acceptance of every unnormalized schema feature is not claimed. |
+| S-11 | Not exercised: live-mode delivery is M6, outside the implemented V1. `liveMidTurn=false`. |
+| S-12 | Doctor's actual Windows sandbox controls pass: inside read/write, outside write denial, and denial of a synthetic file under the protected Stampede state root. Exact ACL verification passed. |
+| S-13 | Full CLI startup p95 118.04 ms over 30 launches, excluding HTTP time. |
+| S-14 | Actual terminal mod read the custom state directory and authenticated to the hub over HTTP. Live desktop and an outside-project mod state directory remain unverified. |
+| S-15 | Actual terminal wake was attributed as “Prompt from the stampede plugin”, produced one follow-up turn and retrieved result 42. Busy submission is suppressed; host `drop` preserves pending updates. Deliberately submitting into a busy real turn was not tested. |
+| S-16 | Actual terminal pane/band/toast/wake observed. Desktop components and action dispatch pass installed-host renderer tests; actual desktop painting remains pending. |
+| S-17 | All launches use generated plugin-disable settings and strict MCP configuration; worker-role recursion guard is present. Exclusion of an already user-installed plugin remains a real-host release check (the plugin is not installed in that scope on this machine). |
+| S-18 | Actual `mcp__plugin_stampede_stampede__workflow_run` interception stamped the live Claude session ID and selected the resulting run. Both this prefix and standalone `mcp__stampede__` are supported. |
+| S-19 | The actual timer delivered a wake between terminal turns; CAS overlap guard is exercised by fixtures. Live hot-reload re-registration remains pending. |
+| S-20 | Original ancestry probe passed with the persistent helper; implementation recovery checks also reject a mismatched creation identity and terminate the exact orphan instance. |
+| S-21/S-24 | Preemption is outside V1. Original S-21 smoke observations are retained; they do not qualify the deferred preemption barrier. |
+| S-22/S-23 | Original immutable-resume and sandbox/ACL controls passed; doctor now repeats synthetic state-ACL/readiness controls per changed backend version. |
+| S-25 | Exact production shell/hook network behavior remains unverified. No shell network-denial claim is made. The real mixed team proves that its actual agent MCP processes could contact the hub. |
+
+Additional local evidence (ignored, not published):
+
+- `artifacts/s6-options-20261008-fixed/summary.json`: corrected schema-file probe. The earlier S-6 attempt lacked the variadic-argument separator and is not evidence of schema support.
+- `artifacts/s6-s9-options-20261008/summary.json`: all five effort levels.
+- `artifacts/doctor-20261008/final-doctor.json`: exact ACL, readiness and protected-state canary results.
+- `artifacts/setup-maintenance-20261008/probe-summary.json`: initialization, duplicate hub, restart refusal/force recovery and retention.
+- `artifacts/plugin-connect-20261008/`: real plugin MCP doctor, tool-prefix and ownership check.
+- `artifacts/terminal-ui-20261008/`: real terminal run and seen-cursor state. Session `4d1bdbe1-7f6b-4ca3-aab9-f9750cd2ebef`, run `run_01M4D2RES17PR4XS6D96B18TDV`, result 42. The probe session exited and its hub was shut down.
+
+The 15 mod tests and 27 core tests pass. The integration suite additionally verifies that mark_done does not publish an early result: an observation times out with null, run-end drain then stores the delayed final answer. No actual Claude calls were made after the terminal reported 98% weekly usage. Outstanding host checks are tracked in `V1_STATUS.md`; this matrix is not a claim that unperformed probes passed.

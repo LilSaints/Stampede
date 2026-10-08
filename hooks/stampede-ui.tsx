@@ -9,10 +9,11 @@ export function initialState(): StampedeUiState {
   return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], composer: null, inFlight: false, lastPoll: 0, wakeEnabled: true, pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
 }
 export function reduce(state: StampedeUiState, snapshot: any, events: any[], session: string, now: number): StampedeUiState {
-  const next = { ...state, runs: { ...state.runs }, pendingWake: [...state.pendingWake], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
+  const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
   for (const run of snapshot.runs ?? []) next.runs[run.runId] = run;
   next.ownedRunIds = Object.values(next.runs).filter(r => r.orchestratorSessionId === session).map(r => r.runId);
-  next.selectedRunId ??= next.ownedRunIds[0] ?? snapshot.runs?.[0]?.runId ?? null;
+  if (!next.selectedRunId || !next.runs[next.selectedRunId]) next.selectedRunId = next.ownedRunIds[0] ?? snapshot.runs?.[0]?.runId ?? null;
+  next.wakeSeen = Object.fromEntries(Object.entries(state.wakeSeen ?? {}).filter(([id]) => next.runs[id]));
   const candidates = snapshot.reconcile ? [...(snapshot.runs ?? []).flatMap((r: any) => r.notifications ?? []), ...events] : events;
   for (const event of candidates) {
     const run = next.runs[event.runId];
@@ -23,7 +24,7 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
     else if (['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'orchestrator.action'].includes(kind)) text = `run ${run.runId}: ${kind} ${clean(JSON.stringify(event.data), 230)}`;
     if (text && !next.pendingWake.some(w => w.hubSeq === event.hubSeq)) { next.pendingWake.push({ runId: run.runId, hubSeq: event.hubSeq, kind, text: clean(text) }); next.pendingSince ||= now; next.lastTrigger = now; }
   }
-  next.pendingWake = next.pendingWake.filter(w => w.hubSeq > (next.runs[w.runId]?.seenSeq ?? 0));
+  next.pendingWake = next.pendingWake.filter(w => next.runs[w.runId] && w.hubSeq > (next.runs[w.runId]?.seenSeq ?? 0));
   next.wakeTimes = state.wakeTimes.filter(time => now - time < 3600000);
   return next;
 }
@@ -45,7 +46,7 @@ async function state($: Engine) { return (await $.state.get({ plugin: 'stampede'
 async function change($: Engine, fn: (s: StampedeUiState) => StampedeUiState) {
   await update($, { plugin: 'stampede', key: 'ui' }, current => fn(current ?? initialState()));
 }
-async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stampede', title: 'Stampede' }); await change($, s => ({ ...s, paneOpen: true })); if (!placed.isPlaced) $.ui.toast('Stampede: /stampede to open the pane'); }
+async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stampede', title: 'Stampede', closeOnEscape: true }); await change($, s => ({ ...s, paneOpen: true })); if (!placed.isPlaced) $.ui.toast('Stampede: /stampede to open the pane'); }
 
   async function home($: Engine) { return (await state($)).stampedeHome ?? (await $.env.get('STAMPEDE_HOME')) ?? `${(await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))}/.stampede`; }
   async function request($: Engine, route: string, body?: unknown) {
@@ -67,7 +68,12 @@ async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stamp
     const submitted = new Set(held.pendingWake.map(w => w.hubSeq));
     try {
       if ((await state($)).busy) return;
-      await $.prompt.submit({ text: wakePrompt(held) });
+      const result = await $.prompt.submit({ text: wakePrompt(held) });
+      if (result.drop !== undefined) {
+        await change($, s => ({ ...s, lastTrigger: now, pendingSince: now }));
+        $.ui.toast(`Stampede wake not submitted: ${clean(result.drop, 100)}`);
+        return;
+      }
       await change($, s => ({ ...s, wakeSeen: held.pendingWake.reduce((seen, w) => ({ ...seen, [w.runId]: Math.max(seen[w.runId] ?? 0, w.hubSeq) }), s.wakeSeen ?? {} as Record<string, number>), pendingWake: s.pendingWake.filter(w => !submitted.has(w.hubSeq)), wakeTimes: [...s.wakeTimes.filter(time => now - time < 3600000), now], pendingSince: 0 }));
     } finally { await change($, s => ({ ...s, wakeInFlight: false })); }
   }
@@ -102,6 +108,10 @@ async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stamp
     catch (error) { $.ui.toast(`Stampede: ${clean(String(error), 160)}`); await change($, s => ({ ...s, actionPending: false })); }
   }
 export const register: Register = (on, options) => {
+  on('ui.close', { id: 'stampede' }, async ($, event, next) => {
+    if (event.origin.kind === 'person' && (await state($)).composer) { await change($, s => ({ ...s, composer: null })); return { value: undefined }; }
+    await change($, s => ({ ...s, paneOpen: false, composer: null })); return next(event);
+  });
   on('session.start', async ($, event, next) => {
     if (!(await $.session.surfaces()).length) return next(event);
     const wakeEnabled = (await $.store.get('wakeEnabled')) !== false;
@@ -113,10 +123,12 @@ export const register: Register = (on, options) => {
   on('turn.start', async ($, event, next) => { await change($, s => ({ ...s, busy: true })); return next(event); });
   on('turn.complete', async ($, event, next) => { await change($, s => ({ ...s, busy: false })); $.clock.after(1, () => flush($)); return next(event); });
   on('tool.call', async ($, event, next) => {
-    if (!event.tool.startsWith('mcp__stampede__')) return next(event);
+    const prefix = ['mcp__plugin_stampede_stampede__', 'mcp__stampede__'].find(value => event.tool.startsWith(value));
+    if (!prefix) return next(event);
+    const tool = event.tool.slice(prefix.length);
     const session = await $.session.id();
     const result = await next({ ...event, orchestratorSessionId: session } as typeof event);
-    if (['mcp__stampede__workflow_run', 'mcp__stampede__workflow_resume'].includes(event.tool)) {
+    if (['workflow_run', 'workflow_resume'].includes(tool)) {
       const value: any = (result as any).result;
       let data; try { data = typeof value === 'string' ? JSON.parse(value) : value?.content ? JSON.parse(value.content.find((c: any) => c.type === 'text')?.text ?? '{}') : value; } catch {}
       if (data?.runId) { const held = await state($); await change($, s => ({ ...s, ownedRunIds: [...new Set([...s.ownedRunIds, data.runId])], selectedRunId: data.runId, lastPoll: 0 })); if (!held.ownedRunIds.length) await openPane($); }

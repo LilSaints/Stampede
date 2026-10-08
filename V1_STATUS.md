@@ -1,39 +1,34 @@
 # V1 implementation status
 
-Goal: finish SPEC.md M0–M5. This is an implementation checkpoint, not a release declaration. M6 live steering and preemption are excluded.
+2026-10-08. M0–M5 implementation is present; V1 release acceptance is still pending. M6 live steering and Appendix A preemption are excluded. No release tag has been created.
 
-## Implemented and exercised
+## Implemented
 
-- Private GitHub repository initialized at LilSaints/Stampede; initial specification and spike sources pushed.
-- Strict TypeScript runtime, parser, worker watchdog, deterministic hooks, parallel and pipeline execution.
-- Local authenticated hub, MCP shims, process adapters, Windows state ACL and ancestry helper.
-- Scheduler reservations, gang admission, non-comms reserve, bounded admission failures.
-- Durable message claims, transport handoff acknowledgements, abnormal-turn redelivery, board.
-- Run lifecycle, budgets, agent controls, worktrees, input fingerprints, individual cache and whole-team replay.
-- Interrupted-run recovery revokes credentials and checks process creation identity before terminating an orphan.
-- Setup, doctor, retention and worktree garbage collection commands; hub restart endpoint.
-- Claude mod pane, actions, owner-specific wakes, debounce/rate cap and busy suppression.
+- Strict TypeScript workflow parser/runtime, deterministic hooks, watchdog, parallel/pipeline execution and limits.
+- Local authenticated hub, role-scoped MCP shims, Claude/Codex process adapters, exact Windows state ACL and process ancestry helper.
+- Gang admission, persistent comms reservations, non-comms reserve, project/run caps and bounded admission failures.
+- Durable message claims and transport acknowledgements, abnormal-turn redelivery, board, idle resume and once-only limit notifications.
+- Agent controls, budgets, schema repair, worktrees, input fingerprints, individual caching and verified whole-team replay.
+- Interrupted-run recovery with process creation identity checks; configuration initialization, doctor, retention, worktree collection and restart controls.
+- Claude pane, actions, session ownership, seen cursors, event-gap recovery, completion wakes, debounce/rate limit and busy suppression.
+- Installation documentation and bundled workflow authoring skill.
 
-Last full core suite: 25 tests passed. Last mod suite: 11 tests passed. Strict plugin validation and both TypeScript projects passed before the latest edits; repeat relevant checks before release.
+## Verification completed
 
-## Measured real-backend results
+- 27 core tests pass. Delivery testing covers 1,000 seeded schedules with 600 worker deliveries each. Integration covers admission timeout, idle release, pending-message retention at resume limits, auth fast-failure, timeout retry, budget limits, delayed final output after mark_done, run-end drain, cache replay, and orphan recovery.
+- 15 plugin tests pass, including terminal/desktop render fixtures at widths 40/100/160, mutating pane actions, actual plugin tool-prefix interception, polling/wake behavior and a bounded 1,000-agent pane.
+- Core and installed-host mod TypeScript checks pass. Strict plugin validation passes.
+- Real Claude-to-Codex schema pipeline and mixed-backend coordination team pass.
+- Eight concurrent Codex conversations over three waves (24 turns) pass with shared home and correct resume identity.
+- Actual terminal plugin session records ownership, submits one attributed completion wake, retrieves result 42, advances its seen cursor and renders `/stampede`.
+- Doctor verifies the exact state ACL, workspace-write readiness and denial of a synthetic protected-state read. Init, duplicate-hub handling, refused active restart, forced restart recovery and retention passed the maintenance probe.
 
-- Claude 2.1.292: settings hook fired, inherited the synthetic environment nonce, and injected context; a 45-second MCP wait completed.
-- Codex 0.159.2: per-call MCP and developer instructions worked. Per-call hooks were not observed, including trusted-hook and corrected-regex probes. The polling/resume fallback remains selected.
-- Codex shared home: eight simultaneous conversations over three waves (24 turns), including two resume waves, passed with correct thread IDs and remembered nonces; no database-corruption signatures were observed.
-- Earlier S20–S23 ancestry/sandbox evidence is recorded in spikes/RESULTS.md.
-- Real Claude-to-Codex pipeline and a mixed team using actual MCP worker shims passed. Claude read-only coordination required default permission mode with explicit allow/deny rules; plan mode prevented truthful mutating coordination tools.
-- Hook startup: 30 Windows launches, 118.04 ms p95 (hub round trip excluded).
+See [spikes/RESULTS.md](spikes/RESULTS.md) for the capability matrix, selected fallbacks and local evidence paths. Raw artifacts, credentials, CLI session output, generated declarations and local Claude settings remain ignored.
 
-## Still required before claiming V1 complete
+## Remaining release gates
 
-- Finish and record the remaining applicable M0 capability probes. Capability results must invalidate on backend version changes.
-- Qualify actual plugin transport, tool interception and wakes in interactive Claude; manual desktop surface checks cannot be replaced by the test renderer.
-- Finish UI action/transport/wake integration tests and event-gap reconciliation checks. The bounded view, recipient Select/Send, numeric tab hotkeys and snapshot notification recovery are implemented.
-- Finish lifecycle audit and race tests. Retry slot release, idle reservation release, per-agent metadata, lifecycle events and log rotation are implemented.
-- Broaden end-to-end parity coverage to both actual backends, messaging transports, crash/timeout/auth/schema failures and mixed-backend workflows.
-- Complete doctor sandbox readiness and plugin connectivity reporting; verify init/restart/gc behavior.
-- Verify the installation documentation and bundled workflow authoring skill against the final behavior.
-- Review changes, run release checks, commit and publish the implementation. Raw probe artifacts, local Claude settings and generated CLI declarations stay excluded.
+1. Complete the live host checklist: Claude desktop Code tab transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner; live terminal layouts at 40/100/160 and hot-reload timer re-registration. Renderer fixtures do not establish actual host painting or reload behavior. Available computer-control tools cannot operate the desktop Code tab; user verification has been requested.
+2. Finish the outstanding real-host portions of S-14–S-19, including installed-plugin recursion exclusion. See the probe matrix for explicitly unmeasured cases. Network behavior remains unverified under the conservative S-25 fallback.
+3. Review acceptance evidence, then create a versioned release with the built `dist/` artifacts included as required by the spec. Development checkouts build with `npm ci` and `npm run build`.
 
-Raw evidence is local under ignored `spikes/artifacts/`. Do not treat an unperformed probe as passing.
+The code is reviewable and the automated checks pass. These outstanding gates prevent declaring the original “Finish V1” goal complete.
