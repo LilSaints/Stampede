@@ -2,7 +2,7 @@
 
 A local Claude Code plugin for JavaScript workflows over Claude Code and Codex workers. A loopback hub owns runs, worktrees, messages and cached results; the mod provides the pane and session-specific completion wakes.
 
-Release candidate `1.0.0-rc.1` is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
+Release candidate `1.0.0-rc.2` is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
 
 The [V1 acceptance audit](V1_ACCEPTANCE.md) maps the requirements to automated,
 real-backend and terminal evidence. Live desktop acceptance remains pending.
