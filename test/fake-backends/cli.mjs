@@ -77,6 +77,9 @@ if (codex) {
   }
   emit({ type: 'thread.started', thread_id: id });
   emit({ type: 'turn.started' });
+  // Codex reports a stream it is retrying as an `error` event, and a lost one as `turn.failed`.
+  if (prompt === 'fixture:reconnect') emit({ type: 'error', message: 'Reconnecting... 2/5 (stream disconnected before completion: websocket closed by server before response.completed)' });
+  if (prompt === 'fixture:stream-lost') { emit({ type: 'error', message: 'stream disconnected before completion' }); emit({ type: 'turn.failed', error: { message: 'stream disconnected before completion' } }); process.exit(1); }
   emit({ type: 'item.completed', item: { type: 'agent_message', text: output } });
   emit({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3, reasoning_output_tokens: 1 } });
   const last = argv.indexOf('-o'); if (last >= 0) await writeFile(argv[last + 1], output);

@@ -102,10 +102,11 @@ test('USD admission and accounting use the effective agent-type model', { timeou
     delete config.pricing.codex.base;
     const priced = await run({ backend: 'codex', agentType: 'priced' });
     assert.equal(priced.status, 'completed', JSON.stringify(priced.error));
-    assert.ok(Math.abs(priced.budget.spentUsd - 0.000034) < 1e-12);
+    // (10 - 2 cached) × 2 + 2 × 1 + 3 output (its 1 reasoning included) × 4, per million.
+    assert.ok(Math.abs(priced.budget.spentUsd - 0.00003) < 1e-12);
     const override = await run({ backend: 'codex', agentType: 'unknown', model: 'priced' });
     assert.equal(override.status, 'completed');
-    assert.ok(Math.abs(override.budget.spentUsd - 0.000034) < 1e-12);
+    assert.ok(Math.abs(override.budget.spentUsd - 0.00003) < 1e-12);
     await assert.rejects(hub.manager.start({ cwd, budgetUsd: 1, defaultBackend: 'codex', script: meta + 'return 1;' }), /pricing for codex model base/);
   } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });
@@ -123,7 +124,7 @@ test('child workflows share live budgets and cancellation while keeping phase gr
     await hub.manager.active.get(started.runId)!.task;
     const run = hub.manager.get(started.runId);
     assert.equal(run.status, 'completed', JSON.stringify(run.error));
-    assert.deepEqual(run.result, { nested: { value: 'child-value', spent: 4 }, parent: 'parent-value', spent: 8 });
+    assert.deepEqual(run.result, { nested: { value: 'child-value', spent: 3 }, parent: 'parent-value', spent: 6 });
     assert.deepEqual(run.agents.map(a => a.phase), ['▸ child / Inspect', 'Parent']);
     assert.equal(run.phase, 'Parent');
     assert.deepEqual(run.phases.map(p => p.title), ['Parent', '▸ child / Inspect']);

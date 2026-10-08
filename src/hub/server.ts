@@ -7,7 +7,7 @@ import { VERSION, UI_API_VERSION, type Config } from './config.js';
 import { Security, type Identity } from './security.js';
 import { Store, readJson, readJournal } from './store.js';
 import { RunManager } from './runs.js';
-import { type Run, runTerminal, agentTerminal } from './model.js';
+import { type Agent, type Run, runTerminal, agentTerminal } from './model.js';
 import { probeBackends, type BackendInfo } from './capabilities.js';
 import { hash } from './workspaces.js';
 import { validateTool } from '../mcp/tools.js';
@@ -15,12 +15,16 @@ import { parseWorkflow } from '../runtime/parse.js';
 import { envelopes } from './bus.js';
 import { collectRuns } from './maintenance.js';
 
+/** What an agent's turn in flight has spent so far; a turn that ended is in its usage. */
+const live = (a: Agent) => a.turns.at(-1)?.endedAt ? 0 : a.liveTokens ?? 0;
+/** An agent's result inline up to this many characters of JSON; past it, a preview and the file. */
+const AGENT_RESULT_CHARS = 20000;
 const truncate = (value: string, max: number) => value.length > max ? value.slice(0, max) + `…(+${value.length - max} chars)` : value;
 export function summary(run: Run, session?: string) {
   return { runId: run.id, name: run.name, status: run.status, startedAt: run.startedAt, endedAt: run.endedAt, orchestratorSessionId: run.orchestratorSessionId,
     phases: run.phases.map(p => ({ ...p, counts: Object.fromEntries(['queued', 'running', 'waiting', 'idle', 'done', 'failed'].map(s => [s, run.agents.filter(a => a.phase === p.title && a.status === s).length])) })),
-    agents: run.agents.map(a => ({ name: a.name, label: a.label, backend: a.backend, model: a.model, context: a.context, startedAt: a.turns[0]?.startedAt, endedAt: ['done', 'failed', 'cancelled', 'skipped'].includes(a.status) ? a.turns.at(-1)?.endedAt : undefined, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + (a.backend === 'codex' ? a.usage.reasoningTokens : 0), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
-    budget: { spent: run.budget.spentTokens, total: run.budget.totalTokens, spentUsd: run.budget.spentUsd, billedUsd: run.agents.reduce((sum, a) => sum + (a.billing === 'api' ? a.usage.usd ?? 0 : 0), 0) }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
+    agents: run.agents.map(a => ({ name: a.name, label: a.label, backend: a.backend, model: a.model, context: a.context, startedAt: a.turns[0]?.startedAt, endedAt: ['done', 'failed', 'cancelled', 'skipped'].includes(a.status) ? a.turns.at(-1)?.endedAt : undefined, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + live(a), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
+    budget: { spent: run.budget.spentTokens + run.agents.reduce((sum, a) => sum + live(a), 0), total: run.budget.totalTokens, spentUsd: run.budget.spentUsd, billedUsd: run.agents.reduce((sum, a) => sum + (a.billing === 'api' ? a.usage.usd ?? 0 : 0), 0) }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
     resultPath: path.join(path.dirname(run.scriptPath), 'result.json'), error: run.error, notifications: run.notifications ?? [] };
 }
 export async function startHub(options: { home: string; config: Config; cliEntry: string; backends?: Record<'claude' | 'codex', BackendInfo>; security?: Security }) {
@@ -109,6 +113,15 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       observedSeq = manager.hubSeq;
       const view = await runSummary(run!, input.orchestratorSessionId);
       result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, error: run!.error, ...(woke ? { woke } : {}) };
+    } else if (name === 'workflow_result' && input.agent !== undefined) {
+      // One agent's result, readable while the run goes on; a long one is read from its file.
+      const agent = run!.agents.find(a => a.name === input.agent); if (!agent) throw new Error('unknown agent');
+      result = { agent: agent.name, status: agent.status, ...(agent.error ? { error: agent.error } : {}) };
+      if (agent.result !== undefined) {
+        const text = JSON.stringify(agent.result), resultPath = path.join(store.runDir(run!.id), 'agents', agent.id, 'result.json');
+        if (text.length > AGENT_RESULT_CHARS) await store.write(resultPath, agent.result);
+        result = { ...result, ...(text.length > AGENT_RESULT_CHARS ? { result: truncate(text, AGENT_RESULT_CHARS), resultPath } : { result: agent.result }) };
+      }
     } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) }; }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';
@@ -129,7 +142,8 @@ export async function startHub(options: { home: string; config: Config; cliEntry
         result = { name: input.name, scriptPath: file, ...(input.action === 'show' ? { script: await readFile(file, 'utf8') } : {}) };
       }
     } else if (name === 'stampede_doctor') result = { version: VERSION, node: process.version, backends: manager.backends, security: { aclVerified: security.aclVerified, ancestryActive: security.ancestryActive, warnings: security.warnings }, hub: { url: manager.hubUrl, activeRuns: manager.active.size } };
-    if (run && !ui && input.orchestratorSessionId && ['workflow_status', 'workflow_wait', 'workflow_result', 'workflow_messages'].includes(name)) { run.seenSeq[input.orchestratorSessionId] = observedSeq; await store.write(path.join(store.runDir(run.id), 'run.json'), run); }
+    // One agent's result shows none of the run's events, so it leaves the seen cursor, and the wakes it holds back, alone.
+    if (run && !ui && input.orchestratorSessionId && ['workflow_status', 'workflow_wait', 'workflow_result', 'workflow_messages'].includes(name) && !(name === 'workflow_result' && input.agent !== undefined)) { run.seenSeq[input.orchestratorSessionId] = observedSeq; await store.write(path.join(store.runDir(run.id), 'run.json'), run); }
     if (run && ui) await manager.event(run, 'orchestrator.action', { tool: name, action: input.action, agent: input.agent });
     return result;
   }

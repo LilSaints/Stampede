@@ -58,7 +58,8 @@ export function launchTurn(a: AgentLaunch, prompt: string, options: { resumeSess
     }
     if (a.backend === 'codex') {
       if (event.type === 'item.completed' && event.item?.type === 'agent_message') { result.text = event.item.text; finalSeen = true; }
-      if (event.type === 'turn.completed') { result.ok = true; const u = event.usage ?? {}; result.usage = { inputTokens: u.input_tokens ?? 0, cachedInputTokens: u.cached_input_tokens ?? 0, outputTokens: u.output_tokens ?? 0, reasoningTokens: u.reasoning_output_tokens ?? 0, usd: null }; }
+      // An `error` event also reports a stream Codex is retrying ("Reconnecting... 2/5"): the turn's own end decides.
+      if (event.type === 'turn.completed') { result.ok = true; delete result.error; const u = event.usage ?? {}; result.usage = { inputTokens: u.input_tokens ?? 0, cachedInputTokens: u.cached_input_tokens ?? 0, outputTokens: u.output_tokens ?? 0, reasoningTokens: u.reasoning_output_tokens ?? 0, usd: null }; }
       if (event.type === 'error' || event.type === 'turn.failed') result.error = { kind: classify(JSON.stringify(event)), message: String(event.message ?? event.error?.message ?? 'Codex turn failed') };
     }
   };

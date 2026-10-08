@@ -55,8 +55,8 @@ Use a local Claude Code-tab session with the plugin loaded and a disposable
 Stampede home. Bring Claude to the foreground before Computer Use begins.
 
 - Verify outside-project discovery and authenticated transport.
-- Exercise Open, tabs, Pause/Resume, recipient Select, message Input/Enter/Send,
-  Retry, Skip, Copy path, Cancel/No/Yes, Close/Escape and alert dismissal.
+- Exercise Open, tabs, Pause/Resume, Retry, Skip, Stop/Keep running/Stop,
+  Close/Escape and alert dismissal.
   Record whether each action responds within one second.
 - Verify one owned, attributed completion wake; quoted peer-message wake;
   busy suppression; wake toggle and manual wake.

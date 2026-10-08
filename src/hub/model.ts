@@ -18,6 +18,8 @@ export interface Agent {
   externalTools?: string[];
   /** The resolved model and its latest request's size, for the UI. */
   model?: string; context?: { tokens: number; window?: number };
+  /** Tokens the turn in flight has spent so far, counted as `usage` counts them; `usage` takes them over when it ends. */
+  liveTokens?: number;
   /** How the worker pays: an API key's spend is real; a subscription's USD is only an estimate. */
   billing?: 'api' | 'subscription';
   turns: { n: number; kind: string; startedAt: string; endedAt?: string; outcome?: TurnOutcome; stdoutPath: string; stderrPath: string }[];

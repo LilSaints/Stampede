@@ -76,7 +76,7 @@ export class RunManager extends EventEmitter {
     return this.eventMutex.run(async () => {
       if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
-      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
+      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
       await this.store.append(path.join(this.store.runDir(run.id), 'events.jsonl'), event);
       await this.store.write(path.join(this.store.runDir(run.id), 'run.json'), run);
@@ -300,6 +300,9 @@ export class RunExecution {
       if (!found || this.codexRead.get(a.id)?.n !== n) return;
       a.context = { tokens: found.tokens, ...(found.window ? { window: found.window } : {}) };
       a.model = found.model ?? a.model;
+      // The rollout counts the whole thread: the turns already ended on it are in `usage`.
+      const open = a.turns.at(-1);
+      if (!final && found.spent !== undefined && open && !open.endedAt) a.liveTokens = Math.max(0, found.spent - a.turns.filter(t => t.endedAt && t.outcome?.sessionId === a.sessionId).reduce((sum, t) => sum + t.outcome!.usage.outputTokens, 0));
     }).catch(() => {});
   }
   private syncPeer(a: Agent) { this.peers.set(a.name, { name: a.name, backend: a.backend, comms: a.comms.enabled, canMessage: a.comms.canMessage, status: a.status, markedDone: a.markedDone, turn: a.turns.length }); }
@@ -365,6 +368,8 @@ export class RunExecution {
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
     c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks };
+    // The model asked for shows until the backend reports the one it resolved.
+    a.model ??= c.launch.model;
   }
   private async turn(c: AgentContext, initialPrompt: string, resume: boolean) {
     const a = c.agent;
@@ -382,6 +387,7 @@ export class RunExecution {
       await this.status(c, resume ? 'resuming' : 'starting');
       await this.event('agent.turn.start', { name: a.name, n, kind });
       this.run.counters.agentsRunning++;
+      const replies = new Map<string, number>();
       c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => {
         a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id;
         const tools = externalTools(event);
@@ -391,20 +397,23 @@ export class RunExecution {
           if (event.type === 'system' && event.subtype === 'init' && typeof event.apiKeySource === 'string') a.billing = event.apiKeySource === 'none' ? 'subscription' : 'api';
           const context = claudeContext(event), window = claudeWindow(event);
           if (context || window) a.context = { tokens: context?.tokens ?? a.context?.tokens ?? 0, ...((window ?? a.context?.window) ? { window: window ?? a.context?.window } : {}) };
+          // Each of the turn's requests reports its output, one message id per request.
+          if (event.type === 'assistant' && !event.parent_tool_use_id && typeof event.message?.id === 'string' && event.message.usage) { replies.set(event.message.id, event.message.usage.output_tokens ?? 0); a.liveTokens = [...replies.values()].reduce((sum, n) => sum + n, 0); }
         } else if (event.type === 'item.completed' || event.type === 'turn.completed') this.codexContext(a, event.type === 'turn.completed');
       } });
       await this.status(c, 'running');
       const outcome = await c.handle.done; c.handle = undefined; this.run.counters.agentsRunning--;
       if (a.access !== 'read-only') await invalidateFingerprint(a.workspace.path, a.access === 'full');
-      turn.endedAt = now(); turn.outcome = outcome; a.sessionId = outcome.sessionId ?? a.sessionId;
-      if (a.backend === 'codex') { a.model ??= launch.model; this.codexContext(a, true); }
+      turn.endedAt = now(); turn.outcome = outcome; delete a.liveTokens; a.sessionId = outcome.sessionId ?? a.sessionId;
+      if (a.backend === 'codex') this.codexContext(a, true);
       for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) a.usage[key] += outcome.usage[key];
       const pricing = a.backend === 'codex' ? this.config.pricing.codex?.[launch.model!] : undefined;
-      if (pricing) outcome.usage.usd = (Math.max(0, outcome.usage.inputTokens - outcome.usage.cachedInputTokens) * pricing.inputPerMTok + outcome.usage.cachedInputTokens * pricing.cachedPerMTok + (outcome.usage.outputTokens + outcome.usage.reasoningTokens) * pricing.outputPerMTok) / 1e6;
+      if (pricing) outcome.usage.usd = (Math.max(0, outcome.usage.inputTokens - outcome.usage.cachedInputTokens) * pricing.inputPerMTok + outcome.usage.cachedInputTokens * pricing.cachedPerMTok + outcome.usage.outputTokens * pricing.outputPerMTok) / 1e6;
       // Codex has no USD of its own: one priced from the user's configured rates is treated as billed.
       if (pricing) a.billing = 'api';
       if (outcome.usage.usd !== null) { a.usage.usd = (a.usage.usd ?? 0) + outcome.usage.usd; this.run.budget.spentUsd += outcome.usage.usd; }
-      this.run.budget.spentTokens += outcome.usage.outputTokens + (a.backend === 'codex' ? outcome.usage.reasoningTokens : 0);
+      // Both backends count reasoning inside output tokens; `reasoningTokens` is its share, for information.
+      this.run.budget.spentTokens += outcome.usage.outputTokens;
       this.runtime?.setSpent(this.run.budget.spentTokens);
       for (const child of this.childRuntimes) child.setSpent(this.run.budget.spentTokens);
       await this.event('agent.usage', { name: a.name, usage: outcome.usage, budget: this.run.budget });
@@ -421,7 +430,8 @@ export class RunExecution {
             const validate = validateSchema(c.opts.schema); if (!validate(result)) throw new Error(JSON.stringify(validate.errors).slice(0, 1024));
           }
           if (result === undefined) throw new Error('missing final output');
-          a.result = result; a.resultStoredAtTurn = n;
+          // A turn that stored a result supersedes an earlier attempt's error.
+          a.result = result; a.resultStoredAtTurn = n; delete a.error;
           if (!a.comms.enabled || a.markedDone || c.autoDone && this.bus.uncommitted([a.name]) === 0) await this.finish(c, 'done');
           else { await this.status(c, 'idle'); this.scheduleResumes(); }
           return;
@@ -435,7 +445,13 @@ export class RunExecution {
       const limited = ['rate_limit', 'overloaded'].includes(error.kind);
       if (limited) { this.manager.scheduler.rateLimited(a.backend); await this.event('scheduler.cooldown', { backend: a.backend }); }
       const maxAttempts = limited ? 6 : ['crash', 'unknown'].includes(error.kind) ? 3 : ['schema', 'timeout'].includes(error.kind) ? 2 : 1;
-      if (++attempts >= maxAttempts) { await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed'); return; }
+      if (++attempts >= maxAttempts) {
+        await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed');
+        // Its agent() has resolved null and the script goes on without it, so the orchestrator hears now
+        // rather than at run end; an unavailable backend has already said so for auth and spawn errors.
+        if (a.status === 'failed' && !['auth', 'spawn'].includes(error.kind)) await this.event('agent.failed', { name: a.name, label: a.label, phase: a.phase, attempts, error: { kind: error.kind, message: error.message.slice(0, 300) } });
+        return;
+      }
       if (!a.comms.enabled) { c.release?.(a.id); c.release = undefined; }
       if (limited) await sleep(Math.min(120000, [5000, 15000, 45000][attempts - 1] ?? 120000) + parseInt(hash(a.id).slice(0, 4), 16) % 1000, c.abort.signal);
       if (!a.comms.enabled) c.release = await this.manager.scheduler.acquire([this.slot(c)], c.abort.signal);

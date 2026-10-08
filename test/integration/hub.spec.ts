@@ -90,11 +90,28 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     await waitRun({ runId: timed.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal(hub.manager.get(timed.runId).agents[0].error?.kind, 'timeout');
     assert.equal((await call('workflow_result', { runId: timed.runId })).result, null);
-    const budget = await call('workflow_run', { cwd, budgetTokens: 4, script: meta + 'await agent("first"); return await agent("must not start");' });
+    const budget = await call('workflow_run', { cwd, budgetTokens: 3, script: meta + 'await agent("first"); return await agent("must not start");' });
     await waitRun({ runId: budget.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal(hub.manager.get(budget.runId).status, 'failed');
     assert.equal(hub.manager.get(budget.runId).agents.length, 1);
     assert.match(hub.manager.get(budget.runId).error!.message, /budget exhausted/);
+    // A finished agent's result is readable while another still runs.
+    const live = await call('workflow_run', { cwd, script: meta + 'return await parallel([() => agent("first", { name: "first" }), () => agent("x".repeat(25000), { name: "big" }), () => agent("hang", { name: "waiting" })]);', orchestratorSessionId: 'owner' });
+    for (let i = 0; i < 200 && !['first', 'big'].every(name => hub.manager.get(live.runId).agents.find(a => a.name === name)?.status === 'done'); i++) await new Promise(r => setTimeout(r, 20));
+    assert.deepEqual(await call('workflow_result', { runId: live.runId, agent: 'first' }), { agent: 'first', status: 'done', result: 'first' });
+    // A long result comes as a preview, the whole value in its file.
+    const big = await call('workflow_result', { runId: live.runId, agent: 'big' });
+    assert.match(big.result, /^"x+…\(\+5002 chars\)$/);
+    assert.equal(await readJson(big.resultPath), 'x'.repeat(25000));
+    assert.equal((await call('workflow_result', { runId: live.runId, agent: 'waiting' })).result, undefined);
+    assert.equal(hub.manager.get(live.runId).status, 'running');
+    await call('workflow_control', { runId: live.runId, action: 'cancel' });
+    // An agent that fails its last attempt is a notification, so the mod wakes the orchestrator mid-run.
+    const lost = await call('workflow_run', { cwd, script: meta + 'return await agent("crash", { name: "lost" });', orchestratorSessionId: 'owner' });
+    await waitRun({ runId: lost.runId, timeoutSec: 5 });
+    const failed = hub.manager.get(lost.runId).notifications!.find(n => n.type === 'agent.failed');
+    assert.equal(failed?.data.name, 'lost'); assert.equal(failed?.data.attempts, 3); assert.equal(failed?.data.error.kind, 'crash');
+    assert.equal(hub.manager.get(lost.runId).notifications!.filter(n => n.type === 'agent.failed').length, 1);
     const limited = await call('workflow_run', { cwd, script: meta + 'const t=await spawnTeam([{name:"limited",prompt:"idle",maxResumes:0}]); await t.untilQuiet({idleMs:0,maxMs:2000}); await new Promise(()=>{});' });
     const execution = hub.manager.active.get(limited.runId)!;
     for (let i = 0; i < 100 && execution.run.agents[0]?.status !== 'idle'; i++) await new Promise(r => setTimeout(r, 20));

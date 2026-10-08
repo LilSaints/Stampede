@@ -297,7 +297,7 @@ BoardEntry { seq: number; id: string; author: string; topic?: string;
 Usage { inputTokens: number; cachedInputTokens: number; outputTokens: number;
         reasoningTokens: number; usd: number|null }
 ```
-Mapping: Claude `usage.input_tokens` + `cache_creation_input_tokens` → input, `cache_read_input_tokens` → cached, `output_tokens` → output (thinking included per V-4 `output_tokens_details.thinking_tokens` → reasoning, informational), `total_cost_usd` → usd. Codex `input_tokens` → input, `cached_input_tokens` → cached, `output_tokens` → output, `reasoning_output_tokens` → reasoning, usd = null unless `pricing.codex` has an entry for the model used (§21); a run with `budgetUsd` refuses to start agents on an unpriced backend/model (§17). **Budget "spent tokens" = outputTokens + reasoningTokens** (Codex reports reasoning separately; Claude includes thinking in output, so for Claude reasoning is NOT added again).
+Mapping: Claude `usage.input_tokens` + `cache_creation_input_tokens` → input, `cache_read_input_tokens` → cached, `output_tokens` → output (thinking included per V-4 `output_tokens_details.thinking_tokens` → reasoning, informational), `total_cost_usd` → usd. Codex `input_tokens` → input, `cached_input_tokens` → cached, `output_tokens` → output, `reasoning_output_tokens` → reasoning, usd = null unless `pricing.codex` has an entry for the model used (§21); a run with `budgetUsd` refuses to start agents on an unpriced backend/model (§17). **Budget "spent tokens" = outputTokens** on both backends. Each counts reasoning inside output: Claude's thinking, and Codex's `reasoning_output_tokens`, which is a share of `output_tokens` (every Codex rollout `token_count` has `total_tokens = input_tokens + output_tokens`). `reasoningTokens` is informational and never added again, nor priced again in USD.
 
 ---
 
@@ -546,7 +546,7 @@ Exposed by `stampede mcp --role orchestrator`. All outputs are compact JSON (the
 | `workflow_run` | `{script?: string, scriptPath?: string, name?: string, args?: any, cwd?: string, budgetTokens?: number, budgetUsd?: number, defaultBackend?: 'claude'\|'codex', orchestratorSessionId?: string}` (exactly one of script/scriptPath/name; `orchestratorSessionId` is injected by the mod, never written by the model — §20.5) | `{runId, status:'running', scriptPath}` returns in < 1 s. `cwd` defaults to the shim's cwd (= orchestrator project). `script` is persisted to `runs/<id>/script.js` and the path returned (parity with built-in iterate-by-path). |
 | `workflow_status` | `{runId, verbose?: boolean}` | `{status, phase, phases:[{title, agents:{queued,running,waiting,idle,done,failed}}], agents?:[…] (verbose), log:[last 10], unreadForOrchestrator, latestMessages:[≤5], budget, startedAt, elapsedSec, error?}` |
 | `workflow_wait` | `{runId, timeoutSec?: number /*1–50, default 45*/, wakeOnMessage?: boolean /*default true*/}` | Same as `workflow_status` plus `{woke: 'terminal'\|'message'\|'timeout'}` |
-| `workflow_result` | `{runId}` | `{status, result, error?, resultPath}`; error `not_finished` if non-terminal. |
+| `workflow_result` | `{runId, agent?: string}` | `{status, result, error?, resultPath}`; error `not_finished` if non-terminal. With `agent`, at any time, live run or not: `{agent, status, error?, result?}`, the agent's stored result if it has one; a result over 20 000 characters of JSON comes as a truncated preview plus `resultPath`, the whole value written to `runs/<id>/agents/<agentId>/result.json`. |
 | `workflow_messages` | `{runId, unreadOnly?: boolean /*default true*/, max?: number}` | `{messages:[…]}` marks orchestrator deliveries delivered. |
 | `workflow_send` | `{runId, to: string, text: string}` | `{seq, deliveredTo, queuedFor}` — steering. `to` may be `'*'`. |
 | `workflow_control` | `{runId, action: 'pause'\|'resume'\|'cancel', reason?}` | `{status}`. Pause: no new starts/resumes; running turns finish; script promises stay pending. |
@@ -557,12 +557,12 @@ Exposed by `stampede mcp --role orchestrator`. All outputs are compact JSON (the
 | `stampede_doctor` | `{}` | Versions, backend health, hub info, spike-derived capability flags (§12.6). |
 
 ### 11.1 How the orchestrator learns about events
-MCP gives the server no way to wake its client; the **mod** does it instead (§20.6): it watches the hub and submits a prompt to the session when a run ends, an agent messages the orchestrator, a team deadlocks, or a backend becomes unavailable. Claude therefore does NOT need to poll after `workflow_run`; it ends its turn and is woken. `workflow_wait` remains for the case where Claude deliberately wants to block on a short run inside its current turn.
+MCP gives the server no way to wake its client; the **mod** does it instead (§20.6): it watches the hub and submits a prompt to the session when a run ends, an agent messages the orchestrator, an agent fails for good, a team deadlocks, or a backend becomes unavailable. Claude therefore does NOT need to poll after `workflow_run`; it ends its turn and is woken. `workflow_wait` remains for the case where Claude deliberately wants to block on a short run inside its current turn.
 
 **Seen-cursor (per session):** the hub keeps `seenSeq[runId][sessionId]` = highest event `hubSeq` returned **to that Claude session** by `workflow_status`, `workflow_wait`, `workflow_messages` or `workflow_result`. The session is identified by the `orchestratorSessionId` field the mod injects into every `mcp__stampede__*` tool call (§20.5); calls without it advance no cursor. The owner's mod only consults `seenSeq[runId][ownerSessionId]`, so another session inspecting the run never suppresses the owner's wake. Orchestrator message deliveries (`workflow_messages`) are likewise tracked per session: reading them from session B does not mark them read for owner A.
 
 ### 11.2 Hub HTTP routes shared by shim and mod
-Every orchestrator tool is served by the hub as `POST /v1/orch/<tool_name>` with the same JSON input/output; the shim is a thin forwarder. The mod calls the same routes for its buttons (pause, cancel, skip, retry, send) plus two UI-only routes that are NOT exposed as MCP tools (so they never consume model context):
+Every orchestrator tool is served by the hub as `POST /v1/orch/<tool_name>` with the same JSON input/output; the shim is a thin forwarder. The mod calls the same routes for its buttons (pause, cancel, skip, retry) plus two UI-only routes that are NOT exposed as MCP tools (so they never consume model context):
 - `GET /v1/ui/snapshot` → `{hubSeq, runs: RunSummary[]}` for all non-terminal runs plus runs that ended in the last `ui.recentRunsMin` (default 60) minutes.
 - `GET /v1/ui/events?since=<hubSeq>&max=500` → `{hubSeq, events: UiEvent[], truncated: boolean}`; `truncated:true` tells the mod to re-fetch the snapshot.
 `hubSeq` is a hub-wide monotonically increasing event counter (distinct from per-run message `seq`). Calls made by the mod do NOT advance any seen-cursor (the human looking at the pane is not Claude seeing it), except actions taken by the human, which the hub records as `orchestrator.action` events and includes in the next wake so Claude knows (e.g. "the user paused run X from the pane").
@@ -1027,7 +1027,6 @@ interface StampedeUiState {
   busy: boolean;                                   // a turn is running in this session
   pendingWake: WakeTrigger[];                      // not yet submitted
   wakeTimes: number[];                             // submit timestamps, last hour
-  composer: { to: string; text: string } | null;   // Send-message form state
 }
 interface RunSummary {
   runId: string; name: string; status: string; startedAt: string; endedAt?: string;
@@ -1060,8 +1059,8 @@ type WakeTrigger = { runId: string; hubSeq: number;
 - After a session restart, ownership is rebuilt from the snapshot by matching `orchestratorSessionId` to `$.session.id()` (resumed sessions keep their id; a new session does not inherit wakes for old runs — by design).
 
 ### 20.6 Waking the orchestrator
-- **Triggers** (owned runs only; events with `hubSeq > run.seenSeq`): `run.terminal` (completed/failed/cancelled/interrupted), `message.orchestrator` (an agent sent `to:'orchestrator'`), `team.deadlock`, `team.admission_blocked` (a queued team failed admission, §14.5), `backend.unavailable` (auth/spawn failure), `budget.exhausted`, and `orchestrator.action` (the human used a pane button — included only as context in the next wake, never a trigger on its own).
-- **Not triggers** (UI only): phase changes, agent done/failed (non-auth), board findings, messages between agents, quiet teams.
+- **Triggers** (owned runs only; events with `hubSeq > run.seenSeq`): `run.terminal` (completed/failed/cancelled/interrupted), `message.orchestrator` (an agent sent `to:'orchestrator'`), `team.deadlock`, `team.admission_blocked` (a queued team failed admission, §14.5), `backend.unavailable` (auth/spawn failure), `budget.exhausted`, `agent.failed` (an agent failed its last retry: its `agent()` has resolved `null` and the run goes on without it; the wake names the agent, attempts and error, and points to `workflow_result` with `agent`; not raised for budget, admission or auth/spawn failures, which their own triggers report), and `orchestrator.action` (the human used a pane button — included only as context in the next wake, never a trigger on its own).
+- **Not triggers** (UI only): phase changes, agent done, an agent's retries before its last attempt (the pane shows Retrying), board findings, messages between agents, quiet teams.
 - **Busy tracking:** `turn.start` hook sets `busy=true`; `turn.complete` sets `busy=false` and schedules a flush. Wakes are never submitted while `busy`.
 - **Flush:** when `pendingWake` is non-empty and `!busy`, wait `ui.wakeDebounceMs` (default 3000; restarted by new triggers, capped at 15 s total) then, if still `!busy`, drop triggers whose `hubSeq ≤ seenSeq[run][this session]` (this session saw them via a tool meanwhile; other sessions' views never count, §11.1) and submit ONE prompt for all remaining triggers via `$.prompt.submit({ text })`; clear `pendingWake`; push the time onto `wakeTimes`.
 - **Prompt text** (Claude reads it labelled as coming from the `stampede` plugin):
@@ -1089,7 +1088,7 @@ Stampede ● 2 runs · 7 running · 2 waiting · 1 msg for Claude · 182k tok   
 **Pane** (`$.ui.open({ id: 'stampede', title: 'Stampede' })`; drawn by `ui.render` on `{ component: 'Pane', requestId: 'stampede' }`): opened by `/stampede`, the band's `[Open]`, or automatically on the first owned `workflow_run` of the session (an unasked open: seats only at ≥ 144 terminal columns; if `isPlaced` is false, a toast says `Stampede: /stampede to open the pane`). Layout, top to bottom:
 ```
 Runs: [1 review-changes ●] [2 auth-refactor ⏸] [3 other: lint-sweep ✓]
-review-changes  run_…7Q  ● running  12:04  182k / 500k tok
+review-changes  run_…7Q  ● running  12:04  182k / 500k tok   [Pause] [Stop]
 ▸ Find      ✓3 ●2 ○1
     ● claude finder-1    running  14k  reading src/auth/session.ts     [Skip] [Retry]
     ◐ codex  reviewer    waiting   8k  wait_for_message                [Skip] [Retry]
@@ -1097,19 +1096,16 @@ review-changes  run_…7Q  ● running  12:04  182k / 500k tok
 Messages (1 for Claude)
   #41 codex-reviewer → orchestrator: line 88 null check missing; impl disagrees…
   #40 impl → codex-reviewer: fixed in a3f2c1, please re-check
-Log: found 7 candidate issues · verifying 4
-[Pause] [Cancel] [Send message] [Copy result path]
 ```
 - Run tabs: hotkeys `1`–`9`; owned runs first, then other runs (prefixed `other:`), terminal runs fade after `ui.recentRunsMin`.
 - Agent rows: max 30 shown per phase (`…and N more`, no silent truncation). Buttons per row only for non-terminal agents. `[Retry]`/`[Skip]` map to `agent_control`.
-- `[Pause]` toggles `[Resume]`; `[Cancel]` asks for confirmation inline (`Cancel run? [Yes] [No]`).
-- `[Send message]` expands an inline form: `Select` recipient (`*` + comms-enabled agents) and `Input` text; `Enter`/`[Send]` → `workflow_send`; `Esc`/`[Close]` collapses.
+- `[Pause]` and `[Stop]` sit on the run's own row, as the built-in Workflow view's Stop does. `[Pause]` toggles `[Resume]`; `[Stop]` asks for confirmation inline (`Stop this workflow? [Stop] [Keep running]`). The pane has no message form, log or copy controls: the person steers agents by asking Claude, which sends through `workflow_send` and so stays aware of what was said.
 - Width: layout uses `e.props.bodyColumns`; below 60 columns, agent rows drop the last-activity column; below 40, only counts are shown.
 - The whole tree is kept under 20 000 characters (well below the 100 000 limit) by the caps above.
 
 **Status line** (`$.ui.status`): `stampede ● 7 · 182k` while owned runs are active; cleared (`undefined`) otherwise. Optional extra: S-16 checks whether it draws on desktop; the band carries the same information, so nothing is lost if not.
 
-**Toasts** (`$.ui.toast`, default 4 s): owned run terminal (`✓ review-changes completed` / `✗ … failed`), message for Claude, backend unavailable, wake paused. Max 1 toast per 5 s; extra ones merge into the next (`3 Stampede updates`).
+**Toasts** (`$.ui.toast`, default 4 s): owned run terminal (`✓ review-changes completed` / `✗ … failed`), message for Claude, backend unavailable, agent failed (`review-changes: explore-projects failed`), wake paused. Max 1 toast per 5 s; extra ones merge into the next (`3 Stampede updates`).
 
 **Slash command** `/stampede` (registered in `session.start` via `$.command.register`, `immediate: true` so it works while Claude is busy): `/stampede` (open pane), `/stampede wake on|off`, `/stampede hub` (shows hub url/version/health as text). Answered by a `command.run` hook returning `{ text }`.
 

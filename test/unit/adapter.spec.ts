@@ -27,6 +27,15 @@ test('Claude read-only coordination permits messaging without file edits or shel
   assert.ok(!claudeArgv({ ...launch('.'), comms: true, persistNonComms: false }).includes('--no-session-persistence'));
   assert.ok(claudeArgv({ ...launch('.'), comms: false, persistNonComms: false }).includes('--no-session-persistence'));
 });
+test('a Codex turn that reconnects and completes succeeds; one whose stream is lost fails', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede-reconnect-'));
+  try {
+    const recovered = await launchTurn(launch(dir), 'fixture:reconnect').done;
+    assert.equal(recovered.ok, true); assert.equal(recovered.error, undefined); assert.equal(recovered.text, 'fixture:reconnect');
+    const lost = await launchTurn(launch(dir), 'fixture:stream-lost').done;
+    assert.equal(lost.ok, false); assert.match(lost.error!.message, /stream disconnected/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 test('shell-free backend receives a long UTF-8 prompt over stdin and preserves resume session', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede adapter space '));
   try {

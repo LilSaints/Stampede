@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.2';
+export const VERSION = '1.0.0-rc.3';
 export const UI_API_VERSION = 1;
 export function defaults() {
   const concurrency = Math.max(1, Math.min(16, os.cpus().length - 2, Math.floor(os.freemem() / (0.6 * 1024 ** 3))));

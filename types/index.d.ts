@@ -9,7 +9,6 @@ export interface StampedeUiState {
   busy: boolean;
   pendingWake: { runId: string; hubSeq: number; kind: string; text: string }[];
   wakeTimes: number[];
-  composer: { to: string; text: string } | null;
   wakeInFlight?: boolean;
   wakeSeen?: Record<string, number>;
   wakeEnabled: boolean;

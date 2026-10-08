@@ -5,7 +5,7 @@ type Engine = EngineInterface;
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 const clean = (text: string, max = 400) => String(text).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
 export function initialState(): StampedeUiState {
-  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], composer: null, wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
+  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
 }
 export function reduce(state: StampedeUiState, snapshot: any, events: any[], session: string, now: number): StampedeUiState {
   const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], toastPending: [...state.toastPending ?? []], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
@@ -21,10 +21,11 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
     let kind = event.type, text = '';
     if (kind === 'run.status' && terminal(event.data.status)) { kind = 'run.terminal'; text = `run ${run.runId} "${run.name}": ${event.data.status}. Get it with workflow_result.`; }
     else if (kind === 'message.accepted' && (event.data.to === 'orchestrator' || event.data.to === '*') && !['orchestrator', 'system'].includes(event.data.from)) { kind = 'message.orchestrator'; text = `run ${run.runId}: message from ${event.data.from} → orchestrator (#${event.data.seq}): ${JSON.stringify(clean(event.data.text, 280))}. Read workflow_messages.`; }
+    else if (kind === 'agent.failed') text = `run ${run.runId} "${run.name}": agent ${clean(event.data.name, 40)} failed after ${event.data.attempts} attempt${event.data.attempts === 1 ? '' : 's'} (${clean(event.data.error?.kind ?? 'unknown', 30)}): ${JSON.stringify(clean(event.data.error?.message ?? '', 200))}. Its agent() returned null and the run goes on without it; workflow_result with agent reads any finished agent.`;
     else if (['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'orchestrator.action'].includes(kind)) text = `run ${run.runId}: ${kind} ${clean(JSON.stringify(event.data), 230)}`;
     if (text && !next.pendingWake.some(w => w.hubSeq === event.hubSeq)) {
       next.pendingWake.push({ runId: run.runId, hubSeq: event.hubSeq, kind, text: clean(text) }); next.pendingSince ||= now; next.lastTrigger = now;
-      if (['run.terminal', 'message.orchestrator', 'backend.unavailable'].includes(kind)) next.toastPending.push({ runId: run.runId, hubSeq: event.hubSeq, text: clean(notice(kind, run, event), 120) });
+      if (['run.terminal', 'message.orchestrator', 'backend.unavailable', 'agent.failed'].includes(kind)) next.toastPending.push({ runId: run.runId, hubSeq: event.hubSeq, text: clean(notice(kind, run, event), 120) });
     }
   }
   next.pendingWake = next.pendingWake.filter(w => next.runs[w.runId] && w.hubSeq > (next.runs[w.runId]?.seenSeq ?? 0));
@@ -41,6 +42,7 @@ export function notice(kind: string, run: any, event: any) {
   if (kind === 'run.terminal') return `${name} ${(STATUS_LABEL[event.data.status] ?? event.data.status).toLowerCase()}`;
   if (kind === 'message.orchestrator') return `${name}: message from ${clean(event.data.from, 40)}`;
   if (kind === 'backend.unavailable') return `${name}: ${clean(event.data.backend ?? 'backend', 20)} unavailable`;
+  if (kind === 'agent.failed') return `${name}: ${clean(event.data.name, 40)} failed`;
   return `${name}: ${kind.replace(/[._]/g, ' ')}`;
 }
 /** The wake's lines as a person reads them: `review completed · lint: message from critic`. */
@@ -52,6 +54,8 @@ export function wakeSummary(text: string, runs: Record<string, any>) {
     const [, id, quoted, rest] = match, name = clean(runs[id!]?.name ?? quoted ?? id!, 40);
     const status = /^(completed|failed|cancelled|interrupted)\./.exec(rest!)?.[1];
     if (status) return `${name} ${statusLabel(status).toLowerCase()}`;
+    const failed = /^agent (\S+) failed/.exec(rest!)?.[1];
+    if (failed) return `${name}: ${failed} failed`;
     const from = /^message from (\S+)/.exec(rest!)?.[1];
     return from ? `${name}: message from ${clean(from, 40)}` : `${name}: ${clean(rest!.split(' ')[0]!.replace(/[._]/g, ' '), 40)}`;
   });
@@ -110,7 +114,9 @@ export function cells(agents: any[], now: number, limit: number): Cell[] {
 }
 /** Still able to run: Skip and Retry apply, and its phase opens by default. */
 export const isLive = (agent: any) => !['done', 'failed', 'cancelled', 'skipped'].includes(agent.status);
-export const counts = (agents: any[]) => ({ done: agents.filter(a => ['done', 'skipped', 'idle'].includes(a.status)).length, failed: agents.filter(a => ['failed', 'cancelled'].includes(a.status)).length, total: agents.length });
+export const counts = (agents: any[]) => ({ done: agents.filter(a => ['done', 'skipped', 'idle'].includes(a.status)).length, failed: agents.filter(a => ['failed', 'cancelled'].includes(a.status)).length, running: agents.filter(a => ['starting', 'running', 'waiting', 'resuming'].includes(a.status)).length, total: agents.length });
+/** A live run's progress: the agents at work now, and how many of all are done. */
+export const progressText = (c: ReturnType<typeof counts>) => `${c.running} running · ${c.done}/${c.total} done`;
 const CELL = 6, GAP = 2, PITCH = CELL + GAP;
 /**
  * Desktop grid as one small SVG. Runs of equal cells in a row are one rect
@@ -152,8 +158,8 @@ const span = (from?: string, to?: string | number) => {
   const s = Math.max(0, Math.round((end - start) / 1000));
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`;
 };
-/** Short model name for the table; the backend until the agent reports one. */
-export const modelName = (agent: any) => String(agent.model ?? agent.backend).replace(/^claude-/, '').replace(/\[.*\]$/, '');
+/** Short model name for the table; a dash until the hub knows the agent's model. */
+export const modelName = (agent: any) => agent.model ? String(agent.model).replace(/^claude-/, '').replace(/\[.*\]$/, '') : '—';
 /** Context at or past 80% of the model's window draws in the warning color. */
 export const contextFull = (agent: any) => !!agent.context?.window && agent.context.tokens >= agent.context.window * 0.8;
 export const agentTime = (agent: any, now: number) => span(agent.startedAt, agent.endedAt ?? now);
@@ -253,7 +259,7 @@ async function openPane($: Engine, focus = true) { const placed = await $.ui.ope
       await request($, `/v1/orch/${tool}`, input);
       const cancelled = tool === 'workflow_control' && input.action === 'cancel';
       lastPoll = 0;
-      await change($, s => ({ ...s, cancelConfirm: cancelled ? false : s.cancelConfirm, composer: tool === 'workflow_send' || cancelled ? null : s.composer }));
+      await change($, s => ({ ...s, cancelConfirm: cancelled ? false : s.cancelConfirm }));
       await poll($);
     } catch (error) { $.ui.toast(`Stampede: ${clean(String(error), 160)}`); }
     finally { await change($, s => ({ ...s, actionPending: false })); }
@@ -349,8 +355,7 @@ export const register: Register = (on, options) => {
     return { sections: [...result.sections, { id: 'stampede:agent-comms', text: AGENT_COMMS, scope: 'session' as const }] };
   });
   on('ui.close', { id: 'stampede' }, async ($, event, next) => {
-    if (event.origin.kind === 'person' && (await state($)).composer) { await change($, s => ({ ...s, composer: null })); return { value: undefined }; }
-    await change($, s => ({ ...s, paneOpen: false, composer: null })); return next(event);
+    await change($, s => ({ ...s, paneOpen: false })); return next(event);
   });
   const stampedeHome = typeof options.stampedeHome === 'string' && options.stampedeHome ? options.stampedeHome : undefined;
   on('session.start', async ($, event, next) => {
@@ -387,7 +392,7 @@ export const register: Register = (on, options) => {
     const toggle = (event.data as any)?.toggle;
     if (typeof toggle !== 'string') return next(event);
     const at = toggle.indexOf(':'), kind = toggle.slice(0, at), id = toggle.slice(at + 1);
-    if (kind === 'card') await change($, s => ({ ...s, selectedRunId: s.selectedRunId === id ? '' : id, cancelConfirm: false, composer: null }));
+    if (kind === 'card') await change($, s => ({ ...s, selectedRunId: s.selectedRunId === id ? '' : id, cancelConfirm: false }));
     else if (kind === 'phase') await change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [id]: !(PHASE_OPEN.get(id) ?? false) } }));
     else if (kind === 'finished') await change($, s => ({ ...s, finishedCollapsed: !s.finishedCollapsed }));
     else if (kind === 'clear') await change($, s => { const done = s.ownedRunIds.filter(runId => s.runs[runId] && terminal(s.runs[runId].status)); return { ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...done])].slice(-100), selectedRunId: done.includes(s.selectedRunId ?? '') ? '' : s.selectedRunId }; });
@@ -422,17 +427,17 @@ export const register: Register = (on, options) => {
       {rows.map((run, i) => {
         const c = counts(run.agents), done = terminal(run.status);
         const shown = held.paneOpen && held.selectedRunId === run.runId;
-        const progress = done ? `${statusLabel(run.status)} · ${c.total} agent${c.total === 1 ? '' : 's'}` : `${c.done}/${c.total} agents${run.status === 'paused' ? ' · Paused' : ''}`;
+        const progress = done ? `${statusLabel(run.status)} · ${c.total} agent${c.total === 1 ? '' : 's'}` : `${progressText(c)}${run.status === 'paused' ? ' · Paused' : ''}`;
         return <Box key={`band-${i}`} gap={2} alignItems="center">
           <Box width={event.surface === 'terminal' ? 23 : 12} flexShrink={0}>{gridElement(elements, event.surface, `band-grid-${i}`, [...cells(run.agents, now, 11), ...(done ? [] : ['ghost' as const])], 12, 23)}</Box>
-          <Box flexGrow={1} flexShrink={1}><Text wrap="truncate" dimColor={done}>{clean(run.name, 40)}</Text></Box>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}><Text wrap="truncate" dimColor={done}>{clean(run.name, 40)}</Text></Box>
           <Text dimColor>{`${progress} · ${runTime(run, now)}`}</Text>
           <Button key={i ? `open-${i}` : 'open'} plain onPress={() => { void (shown ? change($, s => ({ ...s, paneOpen: false })).then(() => $.ui.close({ id: 'stampede' })) : change($, s => ({ ...s, selectedRunId: run.runId })).then(() => openPane($))); }}>{shown ? 'Hide' : 'View'}</Button>
           {done && <Button key={`dismiss-${i}`} plain onPress={() => { void change($, s => ({ ...s, dismissedRuns: [...(s.dismissedRuns ?? []), run.runId].slice(-50) })); }}>×</Button>}
         </Box>;
       })}
       {earlier.length > 0 && <Box gap={2}><Box flexGrow={1}><Text dimColor>{`${earlier.length} ${rows.length ? 'more' : 'recent'} run${earlier.length === 1 ? '' : 's'}${earlierLive ? ` · ${earlierLive} running` : ''}`}</Text></Box><Button key="open-all" plain onPress={() => { void change($, s => ({ ...s, selectedRunId: earlier[0]!.runId })).then(() => openPane($)); }}>View all</Button></Box>}
-      {alert && !held.compactBand && <Box gap={2}><Box flexShrink={1}><Text color="warning" wrap="truncate">{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text></Box><Button key="dismiss-alert" plain onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}
+      {alert && !held.compactBand && <Box gap={2}><Box flexShrink={1} minWidth={0}><Text color="warning" wrap="truncate">{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text></Box><Button key="dismiss-alert" plain onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}
       {waiting && <Box gap={2}><Text dimColor>{`${held_back.length} Stampede update${held_back.length === 1 ? '' : 's'} for Claude · ${held.wakeEnabled ? 'wake limit reached' : 'wakes off'}`}</Text><Button key="wake" plain onPress={() => { void flush($, true); }}>Send to Claude</Button></Box>}
     </Box>;
   });
@@ -440,39 +445,40 @@ export const register: Register = (on, options) => {
   // tasks: Running, then a collapsible Finished section, each run a small card
   // (name, "Workflow · status · agents · time"). One card at a time expands,
   // on click, into the Workflow detail: collapsible phases, each a grid over
-  // an Agent / Model / Context / Time table, then messages, log and controls.
+  // an Agent / Model / Context / Time table, then messages and controls.
   // Finished runs can be removed one by one or all at once.
   on('ui.render', { component: 'Pane', requestId: 'stampede' }, async ($, event, next) => {
     if (event.surface !== 'terminal' && event.surface !== 'desktop') return next(event);
     const held = await state($); const elements = $.ui.resolve(event) as any;
-    const { Box, Text, Button, Input, Select } = elements;
+    const { Box, Text, Button } = elements;
     const desktop = event.surface === 'desktop';
     const owned = held.ownedRunIds.map(id => held.runs[id]).filter(Boolean);
     const live = owned.filter(r => !terminal(r.status)).slice(0, 8);
     const finished = owned.filter(r => terminal(r.status) && !held.dismissedRuns?.includes(r.runId));
     const run = held.selectedRunId ? owned.find(r => r.runId === held.selectedRunId) : undefined;
-    // Columns drop as the pane narrows, as the built-in table's do: Model,
-    // then the stacked layout below 36 cells.
-    const width = (event.props as any).bodyColumns ?? 100, stacked = width < 36, showModel = width >= 52;
+    // Columns drop as the table narrows, as the built-in table's do: Model,
+    // then the stacked layout. The table sits inside the run card, and on the
+    // desktop inside the Phases block and its phase too, whose rounded edges
+    // take about ten cells across.
+    const width = (event.props as any).bodyColumns ?? 100, table = width - (desktop ? 10 : 4), stacked = table < 32, showModel = table >= 48;
     const now = await $.clock.now();
     const dim = !held.hub.ok, busy = held.actionPending || held.hub.versionMismatch;
     const active = run && !terminal(run.status);
     // A phase opens by default while the run is live and it has unfinished
     // agents, and those phases get the agent rows first. A small run lists up
-    // to 16 rows; a large one keeps to 4, and to none while composing (the
-    // composer's 4,000-character draft needs the room), so the pane stays
-    // within the surface's payload budget.
+    // to 16 rows and a large one 4, so the pane stays within the surface's
+    // payload budget.
     const large = (run?.agents.length ?? 0) > 60;
-    let gridsRemaining = held.composer ? 2 : 4;
+    let gridsRemaining = 4;
     const phases = run ? phaseGroups(run).slice(0, 8).map(phase => { const id = `${run.runId}:${phase.title}`, live = phase.agents.some(isLive); return { ...phase, id, open: held.expandedPhases?.[id] ?? (!!active && live), live }; }) : [];
     const rows = phases.map(() => 0);
-    let left = held.composer ? (large ? 0 : 6) : (large ? 4 : 16);
+    let left = large ? 4 : 16;
     for (const i of phases.map((_, i) => i).sort((a, b) => Number(phases[b]!.live) - Number(phases[a]!.live))) {
       if (!phases[i]!.open) continue;
       rows[i] = Math.min(phases[i]!.agents.length, 30, left); left -= rows[i]!;
     }
     const billed = run?.budget.billedUsd ? ` · $${run.budget.billedUsd.toFixed(2)}` : '';
-    const col = (text: string, w: number, color?: string) => <Box width={w}><Text wrap="truncate" {...(color ? { color } : { dimColor: true })}>{text}</Text></Box>;
+    const col = (text: string, w: number, color?: string) => <Box width={w} flexShrink={0}><Text wrap="truncate" {...(color ? { color } : { dimColor: true })}>{text}</Text></Box>;
     const remove = (ids: string[]) => change($, s => ({ ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...ids])].slice(-100), selectedRunId: ids.includes(s.selectedRunId ?? '') ? '' : s.selectedRunId }));
     const detail = run && <Box flexDirection="column" marginTop={1}>
       <Text dimColor>{`${tokens(run.budget.spent)}${run.budget.total == null ? '' : ` / ${tokens(run.budget.total)}`} tokens${billed}`}</Text>
@@ -491,20 +497,20 @@ export const register: Register = (on, options) => {
         // inside: tinted while open, lit under the pointer while closed.
         return <Box key={`phase-${index}`} flexDirection="column" marginTop={index ? 1 : 0} {...(desktop ? { ...ROUNDED, ...(open ? { backgroundColor: CARD.backgroundColor } : { hover: { backgroundColor: CARD_HOVER } }) } : {})}>
           {desktop
-            ? <Box><elements.Client key={`phase-row-${index}`} module="./row.tsx" flexGrow={1} props={{ id: `phase:${id}`, title: [{ text: clean(phase.title, 60), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total}`, dim: true }] }} /></Box>
+            ? <Box><elements.Client key={`phase-row-${index}`} module="./row.tsx" flexGrow={1} props={{ id: `phase:${id}`, title: [{ text: clean(phase.title, 60), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total} done`, dim: true }] }} /></Box>
             : <Box justifyContent="space-between" gap={1}>
               <Box flexShrink={1}><Text wrap="truncate" {...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {})}>{clean(phase.title, 60)}</Text></Box>
-              <Box gap={1}><Text dimColor>{`${c.done}/${c.total}`}</Text><Button key={`phase-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
+              <Box gap={1}><Text dimColor>{`${c.done}/${c.total} done`}</Text><Button key={`phase-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
             </Box>}
           {drawGrid ? gridElement(elements, event.surface, `grid-${index}`, states, 16, width - 2) : agents.length ? null : <Text dimColor>{active ? 'No agents have started yet' : 'No agents ran in this phase'}</Text>}
           {shown > 0 && <Box flexDirection="column" marginTop={1}>
-            {!stacked && <Box gap={1}><Box flexGrow={1}><Text dimColor>Agent</Text></Box>{showModel && col('Model', 10)}{col('Context', 7)}{col('Time', 7)}</Box>}
+            {!stacked && <Box gap={1}><Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>{showModel && col('Model', 10)}{col('Context', 7)}{col('Time', 7)}</Box>}
             {agents.slice(0, shown).map((a: any) => {
               const done = cellState(a, now) === 'done', live = isLive(a);
               // Skip and Retry show on hover on the desktop, as row actions; the terminal keeps them in view.
               const actions = live && <Box gap={1} marginLeft={1} {...(desktop ? { display: 'none', hover: { display: 'flex' } } : {})}><Button key={`skip-${a.name}`} plain dimColor={busy} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} plain dimColor={busy} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>;
               return <Box key={a.name} gap={1} flexDirection={stacked ? 'column' : 'row'}>
-                <Box flexGrow={1} flexShrink={1}><Text dimColor={dim || done} wrap="truncate">{`${done ? '✓' : a.status === 'failed' ? '✕' : '·'} ${clean(a.label && a.label !== a.name ? a.label : a.name, 40)}`}{a.error ? <Text color="error">{'  Error'}</Text> : ''}</Text>{actions}</Box>
+                <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor={dim || done} wrap="truncate">{`${done ? '✓' : a.status === 'failed' ? '✕' : '·'} ${clean(a.label && a.label !== a.name ? a.label : a.name, 40)}`}{!a.error || done ? '' : live ? <Text color="warning">{'  Retrying'}</Text> : <Text color="error">{'  Error'}</Text>}</Text>{actions}</Box>
                 {!stacked && showModel && col(modelName(a), 10)}
                 {!stacked && col(a.context ? tokens(a.context.tokens) : '—', 7, contextFull(a) ? 'warning' : undefined)}
                 {!stacked && col(agentTime(a, now) || '—', 7)}
@@ -518,25 +524,20 @@ export const register: Register = (on, options) => {
       })}
       {run.phases.length > 8 && <Text dimColor>{`…and ${run.phases.length - 8} more phases`}</Text>}
       {(run.messages ?? []).length > 0 && <Box flexDirection="column" marginTop={1}><Box gap={2}><Text bold>Messages</Text><Text dimColor>{`${run.unreadForOrchestrator ?? 0} for Claude`}</Text></Box>
-        {(run.messages ?? []).slice(held.composer ? -4 : -6).map((m: any) => <Text key={`message-${m.seq}`} dimColor={dim} wrap="truncate"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
-      {!held.composer && (run.log ?? []).length > 0 && <Box flexDirection="column" marginTop={1}><Text bold>Log</Text><Text dimColor wrap="wrap">{(run.log ?? []).slice(-5).map((line: string) => clean(line, 120)).join(' · ')}</Text></Box>}
+        {(run.messages ?? []).slice(-6).map((m: any) => <Text key={`message-${m.seq}`} dimColor={dim} wrap="truncate"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
       </Box>
-      <Box flexDirection="row" flexWrap="wrap" gap={1} marginTop={1}>
-        {active && <Button key="pause" dimColor={busy} onPress={() => { void action($, 'workflow_control', { runId: run.runId, action: run.status === 'paused' ? 'resume' : 'pause' }); }}>{run.status === 'paused' ? 'Resume' : 'Pause'}</Button>}
-        {active && <Button key="compose" onPress={() => { void change($, s => ({ ...s, composer: { to: '*', text: '' } })); }}>Message agents</Button>}
-        <Button key="copy" onPress={(press: any) => { void $.ui.copy({ text: run.resultPath, surface: press.surface }); }}>Copy result path</Button>
-        <Button key="copy-id" onPress={(press: any) => { void $.ui.copy({ text: run.runId, surface: press.surface }); }}>Copy run ID</Button>
-      </Box>
-      {held.composer && active && <Box flexDirection="column" marginTop={1}><Select key="recipient" label="To" options={[{ value: '*', label: 'All agents' }, ...run.agents.filter((a: any) => a.comms).slice(0, 20).map((a: any) => ({ value: a.name, label: clean(a.name, 40) }))]} value={held.composer.to} onSelect={(value: string) => { void change($, s => ({ ...s, composer: { to: value, text: s.composer?.text ?? '' } })); }} /><Text dimColor>Or type any agent name:</Text><Input key="recipient-name" value={held.composer.to} onSubmit={(value: string) => { void change($, s => ({ ...s, composer: { to: value, text: s.composer?.text ?? '' } })); }} /><Text dimColor>Message (Enter sends):</Text><Input key="message" submitLabel="send" value={held.composer.text} onInput={(value: string) => { void change($, s => ({ ...s, composer: { to: s.composer?.to ?? '*', text: value.slice(0, 4000) } })); }} onSubmit={(value: string) => { void action($, 'workflow_send', { runId: run.runId, to: held.composer!.to, text: value }); }} /><Box gap={1}><Button key="send" variant="primary" onPress={() => { void action($, 'workflow_send', { runId: run.runId, to: held.composer!.to, text: held.composer!.text }); }}>Send</Button><Button key="close-compose" onPress={() => { void change($, s => ({ ...s, composer: null })); }}>Close</Button></Box></Box>}
     </Box>;
     const card = (r: any, i: number) => {
       const open = r === run, done = terminal(r.status), c = counts(r.agents);
       const control = done
         ? <Button key={`remove-${r.runId}`} plain onPress={() => { void remove([r.runId]); }}>×</Button>
-        : <Button key={open ? 'cancel' : `stop-${r.runId}`} dimColor={busy} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId, cancelConfirm: true })); }}>Stop</Button>;
+        : <Box gap={1} flexShrink={0}>
+          <Button key={open ? 'pause' : `pause-${r.runId}`} dimColor={busy} onPress={() => { void action($, 'workflow_control', { runId: r.runId, action: r.status === 'paused' ? 'resume' : 'pause' }); }}>{r.status === 'paused' ? 'Resume' : 'Pause'}</Button>
+          <Button key={open ? 'cancel' : `stop-${r.runId}`} dimColor={busy} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId, cancelConfirm: true })); }}>Stop</Button>
+        </Box>;
       if (desktop) return <Box key={`card-${r.runId}`} flexDirection="column" {...CARD} {...(open ? {} : { hover: { backgroundColor: CARD_HOVER } })}>
         <Box gap={1} alignItems="flex-start">
-          <elements.Client key={`head-${r.runId}`} module="./row.tsx" flexGrow={1} props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 60), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, { text: statusLabel(r.status), ...(r.status === 'failed' ? { color: 'error' } : { dim: true }) }, { text: `  ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : `${c.done}/${c.total} agents`}  ${runTime(r, now)}`, dim: true }] }} />
+          <elements.Client key={`head-${r.runId}`} module="./row.tsx" flexGrow={1} props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 60), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, ...(r.status === 'running' ? [] : [{ text: `${statusLabel(r.status)}  `, ...(r.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: `${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)}  ${runTime(r, now)}`, dim: true }] }} />
           {control}
         </Box>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
@@ -544,10 +545,10 @@ export const register: Register = (on, options) => {
       </Box>;
       return <Box key={`card-${r.runId}`} flexDirection="column" paddingX={1} paddingY={desktop ? 1 : 0} {...(desktop ? { backgroundColor: '#8080800d' } : { borderStyle: 'round', borderDimColor: true })}>
         <Box justifyContent="space-between" gap={1}>
-          <Box flexShrink={1}><Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => ({ ...s, selectedRunId: open ? '' : r.runId, cancelConfirm: false, composer: null })); }}>{`${open ? '▾' : '▸'} ${clean(r.name, 50)}`}</Button></Box>
+          <Box flexShrink={1}><Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => ({ ...s, selectedRunId: open ? '' : r.runId, cancelConfirm: false })); }}>{`${open ? '▾' : '▸'} ${clean(r.name, 50)}`}</Button></Box>
           {control}
         </Box>
-        <Text dimColor>{'Workflow · '}<Text {...(r.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{statusLabel(r.status)}</Text>{` · ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : `${c.done}/${c.total} agents`} · ${runTime(r, now)}`}</Text>
+        <Text dimColor>{'Workflow · '}<Text {...(r.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{statusLabel(r.status)}</Text>{` · ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)} · ${runTime(r, now)}`}</Text>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
         {open && detail}
       </Box>;
@@ -603,7 +604,7 @@ export const register: Register = (on, options) => {
     const elements = $.ui.resolve(event) as any; const { Box, Text, Button } = elements;
     if (run && !terminal(run.status)) return runCard($, elements, event.surface, run, now, runId);
     return <Box gap={1}>
-      <Text dimColor>Ran workflow</Text><Box flexShrink={1}><Text dimColor wrap="truncate">{clean(run?.name ?? props.input?.name ?? 'workflow', 60)}</Text></Box>
+      <Text dimColor>Ran workflow</Text><Box flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{clean(run?.name ?? props.input?.name ?? 'workflow', 60)}</Text></Box>
       {run?.status === 'failed' ? <Text color="error">Failed</Text> : run && run.status !== 'completed' ? <Text dimColor>Stopped</Text> : null}
       {run && <Button key={`open-${runId}`} plain onPress={() => { void change($, s => ({ ...s, selectedRunId: runId })).then(() => openPane($)); }}>›</Button>}
     </Box>;

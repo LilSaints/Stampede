@@ -17,7 +17,7 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as any);
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'AbovePrompt', props: { bodyColumns: 100 } as any });
   const drawn = JSON.stringify(await ui.drawn());
-  for (const text of ['review', '1/2 agents · 2m 0s', 'View']) expect(drawn.includes(text)).toBe(true);
+  for (const text of ['review', '1 running · 1/2 done · 2m 0s', 'View']) expect(drawn.includes(text)).toBe(true);
   expect(drawn.includes('other')).toBe(false);
   await ui.press({ key: 'open' });
   expect(state.paneOpen).toBe(true);
@@ -126,6 +126,14 @@ test('toasts inside the rate window are coalesced and shown on a later poll', as
   state = { ...state, wakeTimes: [] }; version++;
   await clock.advance(1000); expect(state.wakeLimitNotified).toBe(false);
 });
+test('an agent that fails for good wakes the orchestrator mid-run with a toast', async () => {
+  const event = { runId: 'owned', hubSeq: 5, type: 'agent.failed', data: { name: 'explore-projects', attempts: 3, error: { kind: 'crash', message: 'fixture crash' } } };
+  const state = reduce(initialState(), { hubSeq: 5, uiApiVersion: 1, runs: [{ ...run(), name: 'review' }] }, [event], 'owner', 100);
+  expect(state.pendingWake.length).toBe(1);
+  expect(state.pendingWake[0]!.text).toBe('run owned "review": agent explore-projects failed after 3 attempts (crash): "fixture crash". Its agent() returned null and the run goes on without it; workflow_result with agent reads any finished agent.');
+  expect(state.toastPending?.[0]?.text).toBe('review: explore-projects failed');
+  expect(wakeSummary(wakePrompt(state), state.runs)).toBe('review: explore-projects failed');
+});
 test('wake ownership and seen cursors are session-specific', async () => {
   const events = [
     { runId: 'owned', hubSeq: 1, type: 'run.status', data: { status: 'completed' } },
@@ -207,15 +215,11 @@ test('a large run stays below the pane payload budget', async ($, on) => {
   large.messages = Array.from({ length: 20 }, (_, seq) => ({ seq, from: 'a'.repeat(40), to: 'b'.repeat(40), text: 'm'.repeat(16000) }));
   large.log = Array(10).fill('x'.repeat(1000));
   const others = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`other-${i}`, run(`other-${i}-` + 'x'.repeat(40), 'someone')]));
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: large, ...others }, ownedRunIds: ['owned'], selectedRunId: 'owned', composer: { to: '*', text: 'draft'.repeat(800) } };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: large, ...others }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 160, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
   const size = JSON.stringify(await ui.drawn()).length;
   if (size >= 20000) throw new Error(`pane payload ${size} exceeds 20000`);
-  state.composer = null as any;
-  await ui.redraw();
-  const closedSize = JSON.stringify(await ui.drawn()).length;
-  if (closedSize >= 20000) throw new Error(`closed composer pane payload ${closedSize} exceeds 20000`);
   await ui.unmount();
 });
 test('tool interception attaches session ownership and selects the new run', async ($, on) => {
@@ -283,26 +287,16 @@ for (const surface of ['terminal', 'desktop'] as const) test(`pane actions route
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(value) } };
   });
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
-  state = { ...state, composer: { to: 'worker', text: 'Keep this draft while pausing' } }; version++;
   await ui.press({ key: 'pause' });
   expect(posts.at(-1)?.body.action).toBe('pause');
-  expect(state.composer?.text).toBe('Keep this draft while pausing');
   expect(state.actionPending).toBe(false);
   await ui.press({ key: 'retry-worker' });
   expect(posts.at(-1)?.route).toBe('agent_control');
   expect(posts.at(-1)?.body.action).toBe('retry');
   await ui.press({ key: 'skip-worker' });
   expect(posts.at(-1)?.body.action).toBe('skip');
-  await ui.press({ key: 'compose' });
-  await ui.redraw();
-  await ui.select({ key: 'recipient', value: 'worker' });
-  await ui.redraw();
-  await ui.input({ key: 'message', text: 'Check the edge case', kind: 'change' });
-  await ui.redraw();
-  await ui.press({ key: 'send' });
-  expect(posts.at(-1)?.route).toBe('workflow_send');
-  expect(posts.at(-1)?.body.to).toBe('worker');
-  expect(posts.at(-1)?.body.text).toBe('Check the edge case');
+  // The pane has no message, copy or log controls: Pause and Stop are the run's.
+  for (const key of ['compose', 'copy', 'copy-id']) expect(await ui.find({ key })).toBeUndefined();
   await ui.press({ key: 'cancel' });
   await ui.redraw();
   await ui.press({ key: 'confirm' });
@@ -367,7 +361,7 @@ test('phases open while the run is active and toggle closed', async ($, on) => {
 test('expanded phases list each agent with its model and context size', async ($, on) => {
   mock.clock(on, { now: 100000 });
   expect(modelName({ backend: 'claude', model: 'claude-opus-5-5[1m]' })).toBe('opus-5-5');
-  expect(modelName({ backend: 'codex' })).toBe('codex');
+  expect(modelName({ backend: 'codex' })).toBe('—');
   expect(contextFull({ context: { tokens: 210000, window: 258400 } })).toBe(true);
   expect(contextFull({ context: { tokens: 16789, window: 258400 } })).toBe(false);
   const fixture: any = { ...run(), agents: [{ name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', status: 'running', tokens: 1, context: { tokens: 46871, window: 1000000 } }, { name: 'critic', backend: 'codex', status: 'queued', tokens: 0 }] };
@@ -399,6 +393,43 @@ test('a desktop that attaches after session start still starts the UI once', asy
   expect(commands).toBe(1); expect(fetches).toBe(2);
   await $.session.attach({ surface: 'mobile', clientId: 'phone' });
   expect(commands).toBe(1);
+});
+// The desktop nests the table in the card, the Phases block and the phase, so
+// it drops columns at a wider pane than the terminal does.
+for (const [surface, narrow, wide] of [['terminal', 51, 52], ['desktop', 57, 58]] as const) test(`the agent table drops Model, then stacks, as the ${surface} pane narrows`, async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const fixture: any = { ...run(), phases: [{ title: 'Explore' }], log: ['11 explorers inventory the desktop'], agents: [{ name: 'shell', backend: 'codex', model: 'gpt-fixture', status: 'running', phase: 'Explore', tokens: 1, context: { tokens: 20400 } }, { name: 'tools', backend: 'codex', status: 'queued', phase: 'Explore', tokens: 0 }] };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  const drawn = async (bodyColumns: number) => {
+    const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+    const text = JSON.stringify(await ui.drawn()); await ui.unmount(); return text;
+  };
+  const full = await drawn(wide);
+  for (const text of ['"Model"', '"Context"', 'gpt-fixture', '1 running · 0/2 done']) expect(full.includes(text)).toBe(true);
+  expect(full.includes('explorers')).toBe(false);
+  const compact = await drawn(narrow);
+  expect(compact.includes('"Model"')).toBe(false);
+  expect(compact.includes('"Context"')).toBe(true);
+  const stacked = await drawn(narrow - 16);
+  expect(stacked.includes('"Context"')).toBe(false);
+  expect(stacked.includes('20.4k context')).toBe(true);
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`an agent retrying after an error says so; only a failed one shows Error on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const error = { kind: 'unknown', message: 'stream disconnected' };
+  const fixture: any = { ...run(), phases: [{ title: 'Explore' }], agents: [{ name: 'retrying', backend: 'codex', status: 'running', phase: 'Explore', tokens: 0, error }, { name: 'recovered', backend: 'codex', status: 'done', phase: 'Explore', tokens: 0, error }] };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned', expandedPhases: { 'owned:Explore': true } };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  let drawn = JSON.stringify(await ui.drawn());
+  expect(drawn.includes('Retrying')).toBe(true);
+  expect(drawn.includes('Error')).toBe(false);
+  fixture.agents[0].status = 'failed';
+  await ui.redraw(); drawn = JSON.stringify(await ui.drawn());
+  expect(drawn.includes('Retrying')).toBe(false);
+  expect(drawn.split('Error').length - 1).toBe(1);
+  await ui.unmount();
 });
 test('a running phase gets the agent rows before a finished one', async ($, on) => {
   mock.clock(on, { now: 100000 });

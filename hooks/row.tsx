@@ -32,7 +32,7 @@ const Row: ClientModule<RowProps, { hover: boolean }> = (props, surface) => {
   const line = (parts: RowPart[]) => <Text wrap="truncate">{parts.map(part => <Text {...(part.dim === true || part.dim === 'rest' && !hover ? { dimColor: true } : {})} {...(part.bold ? { bold: true } : {})} {...(part.color ? { color: part.color } : {})}>{part.text}</Text>)}</Text>;
   return <Box flexDirection="column" flexGrow={1}>
     <Box justifyContent="space-between" gap={1}>
-      <Box flexShrink={1}>{line(props.title)}</Box>
+      <Box flexShrink={1} minWidth={0}>{line(props.title)}</Box>
       {props.right ? line(props.right) : null}
     </Box>
     {props.detail ? line(props.detail) : null}
