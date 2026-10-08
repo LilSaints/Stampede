@@ -13,7 +13,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && node --test dist/test/**/*.spec.js",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "install-plugin": "npm run build && node scripts/install.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
