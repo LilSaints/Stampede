@@ -1,6 +1,6 @@
 # Stampede development
 
-[README.md](README.md) is for users; keep development notes here. The contract is [SPEC.md](SPEC.md); release gates are in [V1_STATUS.md](V1_STATUS.md); [V1_ACCEPTANCE.md](V1_ACCEPTANCE.md) maps requirements to automated, real-backend and terminal evidence (live desktop acceptance is pending).
+[README.md](README.md) is for users; keep development notes here. The contract is [SPEC.md](docs/SPEC.md); release gates are in [V1_STATUS.md](docs/V1_STATUS.md); [V1_ACCEPTANCE.md](docs/V1_ACCEPTANCE.md) maps requirements to automated, real-backend and terminal evidence (live desktop acceptance is pending).
 
 ## Setup
 

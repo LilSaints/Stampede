@@ -160,7 +160,7 @@ Additional local evidence (ignored, not published):
 - `artifacts/plugin-connect-20261008/`: real plugin MCP doctor, tool-prefix and ownership check.
 - `artifacts/terminal-ui-20261008/`: real terminal run and seen-cursor state. Session `4d1bdbe1-7f6b-4ca3-aab9-f9750cd2ebef`, run `run_01M4D2RES17PR4XS6D96B18TDV`, result 42. The probe session exited and its hub was shut down.
 
-The 15 mod tests and 27 core tests pass. The integration suite additionally verifies that mark_done does not publish an early result: an observation times out with null, run-end drain then stores the delayed final answer. No actual Claude calls were made after the terminal reported 98% weekly usage. Outstanding host checks are tracked in `V1_STATUS.md`; this matrix is not a claim that unperformed probes passed.
+The 15 mod tests and 27 core tests pass. The integration suite additionally verifies that mark_done does not publish an early result: an observation times out with null, run-end drain then stores the delayed final answer. No actual Claude calls were made after the terminal reported 98% weekly usage. Outstanding host checks are tracked in `docs/V1_STATUS.md`; this matrix is not a claim that unperformed probes passed.
 
 ## Host and standalone packaging completion
 
@@ -183,7 +183,7 @@ A live terminal was resized with the console API (`mode con`); Node reported the
 
 Observed controls across the live widths: Pause/Resume, broadcast through Input Enter, Select recipient plus Send button, Retry, Skip, clipboard OSC52 with the result path, Cancel dismissal, composer Close, composer Escape, and confirmed cancellation. Mutation responses were visible in the 250–270 ms tool observation window. The terminal fixture ended cancelled (alpha cancelled, beta skipped) and was shut down; all three CLI sessions exited. Local evidence: `artifacts/ui-widths-20261008/manual-summary.json` and its durable run events. Clipboard emission was observed; no unrelated clipboard content was read. Not every action was repeated at every width, and this does not verify the desktop Code tab.
 
-The revised UI passes 19 installed-host tests, mod type checking and strict validation. A broader spec audit identified remaining integration-coverage gaps beyond manual UI acceptance; they are explicitly recorded in `V1_STATUS.md` rather than hidden behind the aggregate test count.
+The revised UI passes 19 installed-host tests, mod type checking and strict validation. A broader spec audit identified remaining integration-coverage gaps beyond manual UI acceptance; they are explicitly recorded in `docs/V1_STATUS.md` rather than hidden behind the aggregate test count.
 
 ## Real-shim fake workers and cache validity
 
@@ -253,4 +253,4 @@ The actual terminal Wake now button passes at 40, 100 and 160 columns. Each fixt
 
 Fresh local checks pass: 48 core tests, 22 plugin tests, strict validation, core/mod TypeScript, and isolated installation without node_modules. The full core run initially exposed a long-poll timeout assumption under load; polling now waits for terminal status within a bounded deadline, and the full rerun passes in 62.4 seconds. Fresh packaging connects MCP, verifies worker exclusion and returns 42; evidence: `artifacts/s17-final-current/summary.json`.
 
-Desktop discovery and state inspection now work, but activation failed twice after refreshing window selection. The live desktop checklist remains blocked on bringing Claude's Code tab to the foreground. [V1_ACCEPTANCE.md](../V1_ACCEPTANCE.md) records the requirement audit and remaining release sequence. These results supersede earlier pending real-backend and terminal-wake statements; no stable release or desktop acceptance is claimed.
+Desktop discovery and state inspection now work, but activation failed twice after refreshing window selection. The live desktop checklist remains blocked on bringing Claude's Code tab to the foreground. [V1_ACCEPTANCE.md](../docs/V1_ACCEPTANCE.md) records the requirement audit and remaining release sequence. These results supersede earlier pending real-backend and terminal-wake statements; no stable release or desktop acceptance is claimed.
