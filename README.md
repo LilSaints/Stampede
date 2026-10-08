@@ -1,34 +1,51 @@
 # Stampede
 
-A local Claude Code plugin for JavaScript workflows over Claude Code and Codex workers. A loopback hub owns runs, worktrees, messages and cached results; the mod provides the pane and session-specific completion wakes.
+Stampede is a Claude Code plugin for running many AI workers at once from a single conversation. You (or Claude) write a short JavaScript workflow; Stampede runs it, starting Claude Code and Codex workers in parallel, in sequence, or as a team that messages each other, and hands the combined result back to your session.
 
-Release candidate `1.0.0-rc.2` is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
+- **Mix backends.** Each worker runs on Claude Code or Codex, with its own model, effort and role.
+- **Safe by default.** Workers are read-only unless you allow edits; editing workers get their own Git worktree, so their changes land on a separate branch you review.
+- **Deterministic and resumable.** Results are cached, so an interrupted or edited workflow resumes without redoing finished work.
+- **Visible.** The `/stampede` pane shows each run, its phases, workers and messages, and wakes your session when a run finishes.
 
-The [V1 acceptance audit](V1_ACCEPTANCE.md) maps the requirements to automated,
-real-backend and terminal evidence. Live desktop acceptance remains pending.
+Everything runs locally through a small hub on your machine. Release candidate `1.0.0-rc.2`; see [V1_STATUS.md](V1_STATUS.md).
 
-## Development installation
+## Install
 
-Requires Node 22+, Git, Claude Code 2.1.292+ and/or Codex 0.159.2+, with the CLI already signed in. The qualified Windows configuration uses Codex's elevated sandbox. Stampede never copies CLI credentials.
+You need Node 22+, Git, and Claude Code 2.1.292+ and/or Codex 0.159.2+, each already signed in. Stampede uses your existing CLI logins and never copies credentials.
+
+There is no prebuilt release yet, so install from a checkout of this repository:
 
 ```powershell
 npm ci
 npm run build
 node dist/cli.js init
 node dist/cli.js doctor
-claude plugin marketplace add C:\Dev\Stampede
+claude plugin marketplace add C:\path\to\Stampede
 claude plugin install stampede@stampede --scope user
 ```
 
-The build produces self-contained CLI, workflow-worker and hook bundles plus the Windows helper; an installed plugin does not need development dependencies. Version coupling is checked during the build.
+`init` reads your Codex defaults and asks before writing Stampede's config; `doctor` checks that the backends and sandbox work. Then run `/reload-plugins` in an open Claude session, or start a new one.
 
-Use `/reload-plugins` in an existing Claude session. For development, use `claude --plugin-dir C:\Dev\Stampede`. The plugin auto-starts the hub when its MCP server connects. `init` previews the Codex defaults it reads from the user's config and asks before writing Stampede's config. State defaults to `~/.stampede`; set `STAMPEDE_HOME` consistently for the CLI and plugin to use another directory.
+## Use
 
-The MCP server is declared inside the plugin manifest. Do not register it again
-as a project server: `${CLAUDE_PLUGIN_ROOT}` and `${user_config.stampedeHome}`
-are resolved by the plugin loader.
+Ask Claude in plain language, for example:
 
-Ask Claude to use Stampede and read the bundled `stampede-workflows` skill. Open `/stampede` for run tabs, messages and controls. With the mod disabled, use `workflow_wait` and `workflow_result` through MCP.
+> Use Stampede to review this branch: have a Claude worker check the API changes and a Codex worker check the tests, then summarise the defects they agree on.
+
+Claude writes a workflow like this and runs it:
+
+```js
+export const meta = { name: 'review', description: 'Review two areas independently' };
+const [api, tests] = await parallel([
+  () => agent('Review the API changes; return concrete defects only.', { name: 'api', backend: 'claude' }),
+  () => agent('Review the tests for missed cases.', { name: 'tests', backend: 'codex' })
+]);
+return { api, tests };
+```
+
+The run starts in the background. Open `/stampede` to watch it, read worker messages, or stop it; your session is woken with the result when it finishes (`/stampede wake off` turns that off). Workflows can also be saved and reused, take `args`, form communicating teams, and resume after an interruption. The bundled `stampede-workflows` skill teaches Claude the full API.
+
+Workers that edit files leave their changes on a Stampede branch. Inspect and merge those branches yourself.
 
 ## Maintenance
 
@@ -38,17 +55,6 @@ node dist/cli.js gc
 node dist/cli.js gc --worktrees
 ```
 
-Restart refuses while a run is active; `--force` interrupts it. Retention removes expired terminal artifacts and keeps summaries by default. Worktree collection asks for confirmation, refuses uncommitted changes and keeps branches. Inspect those branches before integrating changes.
+Restart the hub after updating the plugin; it refuses while a run is active (`--force` interrupts) and keeps running in the foreground. `gc` removes expired run artifacts; `gc --worktrees` asks first and never deletes uncommitted work or branches.
 
-Configuration is `STAMPEDE_HOME/config.json`. Project `.stampede/config.json` can only lower numeric limits. Per-run concurrency cannot exceed `max(1, min(16, cpus − 2))`, even when the home config raises the global or backend pools. Read-only is the default access tier. Claude's contained tier denies arbitrary shell tools; Codex uses its sandbox. These controls do not make untrusted JavaScript or model output safe to execute. The state directory is protected by an exact current-user DACL on Windows, with process-ancestry checks as additional hardening.
-
-## Verification
-
-```powershell
-npm test
-npm run check
-claude plugin validate . --strict
-claude plugin test .
-```
-
-Core tests use local fake backends and temporary repositories. `spikes/` contains explicit real-CLI qualification programs, which consume normal model usage; results are summarized in [spikes/RESULTS.md](spikes/RESULTS.md). Raw artifacts, local Claude settings and generated build-specific mod declarations are ignored by Git. Load the plugin with the installed Claude build to generate `.claude-plugin/types/`, then run `node node_modules/typescript/bin/tsc -p tsconfig.mod.json` for mod type checking.
+State lives in `~/.stampede` (set `STAMPEDE_HOME` to move it), with settings in `config.json` there; a project's `.stampede/config.json` can only lower limits. Sandboxing limits what workers can do, but does not make untrusted workflow code or model output safe to run.
