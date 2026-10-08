@@ -195,6 +195,7 @@ export const register: Register = (on, options) => {
     const runs = Object.values(held.runs).sort((a, b) => Number(held.ownedRunIds.includes(b.runId)) - Number(held.ownedRunIds.includes(a.runId))).slice(0, 9);
     const run = held.selectedRunId ? held.runs[held.selectedRunId] : undefined;
     const width = (event.props as any).bodyColumns ?? 100;
+    const renderedAt = await $.clock.now();
     // Leave room for the recipient picker and the bounded 4,000-character draft.
     let rowsRemaining = held.composer ? 4 : 8;
     return <Box flexDirection="column">
@@ -202,13 +203,13 @@ export const register: Register = (on, options) => {
       {held.hub.versionMismatch && <Text>Plugin and hub versions differ — restart the hub</Text>}
       <Box>{runs.map((r, i) => <Button key={`run-${i}`} hotkey={String(i + 1)} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId })); }}>{`${i + 1} ${held.ownedRunIds.includes(r.runId) ? '' : 'other: '}${clean(r.name, 30)}`}</Button>)}</Box>
       {run ? <Box flexDirection="column">
-        <Text dimColor={!held.hub.ok}>{runHeading(run, held.lastPoll)}</Text>
+        <Text dimColor={!held.hub.ok}>{runHeading(run, renderedAt)}</Text>
         {held.actionPending && <Text>Updating…</Text>}
         {(run.phases.length ? run.phases : [{ title: 'Agents' }]).slice(0, 8).map((phase: any, index: number) => {
           const agents = run.agents.filter((a: any) => a.phase === phase.title || !a.phase && index === 0);
           const shown = Math.min(agents.length, 30, rowsRemaining); rowsRemaining -= shown;
           return <Box key={phase.title} flexDirection="column"><Text dimColor={!held.hub.ok}>{`${clean(phase.title, 60)} · ${agents.length} agents · ${phaseCounts(agents)}`}</Text>
-            {agents.slice(0, shown).map((a: any) => <Box key={a.name} flexDirection={width < 60 ? 'column' : 'row'}><Text dimColor={!held.hub.ok}>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens · ${clean(a.lastLine ?? (a.status === 'waiting' ? 'wait_for_message' : a.lastActivity ? `active ${Math.max(0, Math.floor((held.lastPoll - Date.parse(a.lastActivity)) / 1000))}s ago` : '—'), 80)}` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
+            {agents.slice(0, shown).map((a: any) => <Box key={a.name} flexDirection={width < 60 ? 'column' : 'row'}><Text dimColor={!held.hub.ok}>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens · ${clean(a.lastLine ?? (a.status === 'waiting' ? 'wait_for_message' : a.lastActivity ? `active ${Math.max(0, Math.floor((renderedAt - Date.parse(a.lastActivity)) / 1000))}s ago` : '—'), 80)}` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
             {agents.length > shown && <Text>{`…and ${agents.length - shown} more`}</Text>}
           </Box>;
         })}

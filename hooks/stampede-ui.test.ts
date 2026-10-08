@@ -104,13 +104,15 @@ test('wakes debounce, cap burst delay, suppress busy and coalesce submissions', 
 });
 for (const surface of ['terminal', 'desktop'] as const) for (const width of [38, 40, 60, 100, 160]) {
   test(`pane renders and confirms cancellation on ${surface} at ${width}`, async ($, on) => {
-    const fixture: any = { ...run(), agents: [{ name: 'worker', backend: 'codex', status: 'idle', tokens: 3, comms: true }] };
+    mock.clock(on, { now: 100000 });
+    const fixture: any = { ...run(), startedAt: '1970-01-01T00:00:00Z', agents: [{ name: 'worker', backend: 'codex', status: 'idle', tokens: 3, comms: true }] };
     let state = { ...initialState(), hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
     let version = 1;
     on('state.get', () => ({ value: { value: state, version } }));
     on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: width, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
     expect((await ui.drawn()).type).toBe('Box');
+    expect(JSON.stringify(await ui.drawn()).includes('1:40')).toBe(true);
     expect(await ui.find({ key: 'cancel' })).toBeDefined();
     expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
     expect(await ui.find({ key: 'retry-worker' })).toBeDefined();
@@ -124,6 +126,7 @@ for (const surface of ['terminal', 'desktop'] as const) for (const width of [38,
   });
 }
 test('a large run stays below the pane payload budget', async ($, on) => {
+  mock.clock(on, { now: 100000 });
   const large: any = run();
   large.phases = Array.from({ length: 20 }, (_, i) => ({ title: `phase-${i}-` + 'p'.repeat(60) }));
   large.agents = Array.from({ length: 1000 }, (_, i) => ({ name: `${i}-` + 'a'.repeat(35), backend: 'codex', status: 'running', phase: large.phases[i % 20].title, tokens: 100000, comms: true, lastLine: 'activity'.repeat(80) }));
