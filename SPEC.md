@@ -1003,7 +1003,7 @@ Use OS-level isolation (a separate Windows user, a VM or a container) for genuin
 The only UI is a Claude Code **mod**: the hooks module of the Stampede plugin (§21.3). Sources: official docs `code.claude.com/docs/en/plugins/mods/{overview,interface,api,reference,admin,troubleshoot}` and the API declarations Claude Code writes for the installed build (`.claude-plugin/types/claude-code/index.d.ts`), which are authoritative over this section where they differ.
 
 ### 20.1 Requirements and where it draws
-- Claude Code ≥ 2.1.287 (terminal) / desktop Code tab with bundled Claude Code ≥ 2.1.286. Built and tested against 2.1.293 (this machine).
+- Claude Code ≥ 2.1.287 (terminal) / desktop Code tab with bundled Claude Code ≥ 2.1.286. Terminal qualification uses 2.1.292 (this machine); live desktop qualification remains pending.
 - Draws in: terminal `claude` (incl. editor-integrated terminals) and the desktop app's Code tab (local sessions). Does not draw in: VS Code chat panel, `claude -p`/SDK, Desktop WSL sessions, cloud sessions, Remote Control viewers (they show only what the local terminal draws). No fallback is provided for those (§1 non-goals); the MCP tools keep working there.
 - Elements used: `Box`, `Text`, `Button`, `Input`, `Select` only (available on both terminal and desktop). No `Svg`, `Raster`, `Image`, `Client`. Symbols single-width only: `● ○ ◐ ✓ ✗ ⏸ ↻ ⚠ ▸ ·` (no emoji).
 - Single module file (`hooks/stampede-ui.tsx`), JSX via the global `h`, elements from `$.ui.resolve(e)`. No Node APIs, no `setTimeout`: timers via `$.clock`, network via `$.http.fetch`, files via `$.fs.read`.
