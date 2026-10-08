@@ -570,3 +570,30 @@ test('agent-comms rules join only prompts that can delegate', async () => {
   expect(delegates(['mcp__plugin_stampede_stampede__workflow_run'])).toBe(true);
   expect(delegates(['Read', 'mcp__stampede__send_message'])).toBe(false);
 });
+for (const surface of ['terminal', 'desktop'] as const) test(`an agent's name opens its transcript in a pane of its own on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-09T00:02:00Z') });
+  const active: any = { ...run(), name: 'review', startedAt: '2026-10-09T00:00:00Z', phases: [{ title: 'Explore' }], agents: [{ name: 'worker', label: 'Explore the shell', backend: 'codex', model: 'gpt-6.1-sol', status: 'running', phase: 'Explore', tokens: 1, startedAt: '2026-10-09T00:01:00Z' }] };
+  let state = { ...initialState(), stampedeHome: 'C:/fixture', hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: active }, ownedRunIds: ['owned'], openRuns: ['owned'] as string[] | null }, version = 0;
+  const opened: { id: string; title?: string }[] = [], routes: string[] = [];
+  const transcript = { runId: 'owned', agent: 'worker', label: 'Explore the shell', backend: 'codex', model: 'gpt-6.1-sol', status: 'running', omitted: 0, entries: [
+    { kind: 'prompt', text: 'Inventory the shell' }, { kind: 'tool', tool: 'Shell', text: 'rg --files src' }, { kind: 'text', text: 'Found **12** views.' }, { kind: 'error', text: 'exit 1: no such file' }] };
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('session.id', () => ({ value: 'owner' }));
+  on('fs.read', (_$, event) => ({ value: event.path.endsWith('hub.json') ? '{"port":1234}' : 'fixture-token' }));
+  on('http.fetch', (_$, event) => { routes.push(event.url.replace('http://127.0.0.1:1234', '')); return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(transcript) } }; });
+  on('ui.open', (_$, event) => { opened.push({ id: event.id, title: event.title }); return { value: { isPlaced: true } }; });
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  // A live run's card and a working agent's time count up on the desktop surface's own clock.
+  const drawn = JSON.stringify(await ui.drawn());
+  if (surface === 'desktop') expect(drawn.split('"since"').length - 1).toBe(2);
+  await click(ui, surface, 'transcript-owned-worker', 'agent-row-owned-worker');
+  expect(routes).toEqual(['/v1/ui/transcript?runId=owned&agent=worker']);
+  expect(opened).toEqual([{ id: 'stampede-t-owned-worker', title: 'Explore the shell' }]);
+  expect(state.transcripts?.['stampede-t-owned-worker']?.entries.length).toBe(4);
+  await ui.unmount();
+  const pane = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede-t-owned-worker', props: { bodyColumns: 100, title: 'Explore the shell', isFocused: true, placement: 'dock' } as any });
+  const shown = JSON.stringify(await pane.drawn());
+  for (const text of ['review · gpt-6.1-sol · Working', 'Inventory the shell', 'Shell', 'rg --files src', 'Found **12** views.', 'exit 1: no such file', 'Working…']) expect(shown.includes(text)).toBe(true);
+  await pane.unmount();
+});

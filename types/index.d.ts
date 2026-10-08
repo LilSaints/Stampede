@@ -24,6 +24,8 @@ export interface StampedeUiState {
   /** The run whose Stop is asking to confirm. */
   cancelConfirm: string | false;
   expandedPhases?: Record<string, boolean>;
+  /** Agents' transcripts open in panes of their own, by pane id, as the hub last gave them. */
+  transcripts?: Record<string, { runId: string; agent: string; title: string; backend: string; model: string | null; status: string; entries: { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string }[]; omitted: number; fetched: boolean }>;
   dismissedRuns?: string[];
   finishedCollapsed?: boolean;
   actionPending: boolean;

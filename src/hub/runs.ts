@@ -452,6 +452,8 @@ export class RunExecution {
       const launch = { ...c.launch!, stdoutPath: path.join(dir, `turn-${n}.stdout.jsonl`), stderrPath: path.join(dir, `turn-${n}.stderr.log`), lastMessagePath: path.join(dir, `turn-${n}.last.txt`) };
       const claim = a.comms.enabled ? await this.bus.claim(a.name, resume ? 'resume' : 'read', n, 50) : undefined;
       if (claim?.messages.length) { this.sharedUse(a.name, resume ? 'delivery:resume' : 'delivery:stdin'); prompt += '\n' + envelopes(claim.messages, claim.deliveries, this.peers); }
+      // The turn's prompt beside its stream, for the transcript the pane shows.
+      await writeFile(path.join(dir, `turn-${n}.prompt.txt`), prompt, { mode: 0o600 }).catch(() => {});
       const turn = { n, kind, startedAt: now(), stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath } as Agent['turns'][number];
       a.turns.push(turn); a.stopBlocks = 0;
       await this.status(c, resume ? 'resuming' : 'starting');

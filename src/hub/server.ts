@@ -7,6 +7,7 @@ import { VERSION, UI_API_VERSION, settingsReport, type Config } from './config.j
 import { Security, type Identity } from './security.js';
 import { Store, readJson, readJournal } from './store.js';
 import { RunManager } from './runs.js';
+import { agentTranscript } from './transcript.js';
 import { type Agent, type Run, runTerminal, agentTerminal } from './model.js';
 import { probeBackends, type BackendInfo } from './capabilities.js';
 import { hash } from './workspaces.js';
@@ -214,6 +215,12 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       else if (request.method === 'POST' && url.pathname.startsWith('/v1/orch/')) { if (stopping) throw new Error('hub shutting down'); result = await orch(url.pathname.slice(9), await body(request), request.headers['x-stampede-ui'] === '1'); }
       else if (request.method === 'POST' && agent) result = await agentRoute(bearer, url.pathname.slice(10), await body(request), abort.signal);
       else if (request.method === 'GET' && url.pathname === '/v1/ui/snapshot') result = { uiApiVersion: UI_API_VERSION, version: VERSION, hubSeq: manager.hubSeq, uiConfig: config.ui, runs: await Promise.all([...manager.runs.values()].filter(r => !runTerminal(r.status) || Date.now() - Date.parse(r.endedAt!) < config.ui.recentRunsMin * 60000).map(r => runSummary(r, url.searchParams.get('session') ?? undefined))) };
+      else if (request.method === 'GET' && url.pathname === '/v1/ui/transcript') {
+        // One agent's transcript for its own pane: what it was asked, wrote and did, newest kept.
+        const run = manager.runs.get(url.searchParams.get('runId') ?? ''), agent = run?.agents.find(a => a.name === url.searchParams.get('agent'));
+        if (!run || !agent) throw Object.assign(new Error('unknown run or agent'), { statusCode: 404 });
+        result = { runId: run.id, agent: agent.name, label: agent.label, backend: agent.backend, model: agent.model ?? null, status: agent.status, ...await agentTranscript(agent, path.join(store.runDir(run.id), 'agents', agent.id)) };
+      }
       else if (request.method === 'GET' && url.pathname === '/v1/ui/events') {
         const since = Number(url.searchParams.get('since') ?? 0), max = Math.min(500, Math.max(1, Number(url.searchParams.get('max') ?? 500)));
         const events = manager.events.filter(e => e.hubSeq > since);

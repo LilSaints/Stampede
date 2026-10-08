@@ -79,6 +79,9 @@ export function wakeFinished(text: string) {
 }
 /** How long a finished run keeps its row in the band, unless dismissed. */
 const RECENT_MS = 30 * 60000;
+/** A transcript pane's id: one per agent, within the 64 characters a pane id may have. */
+const TRANSCRIPT = 'stampede-t-';
+const transcriptPane = (runId: string, agent: string) => `${TRANSCRIPT}${runId.slice(-10).toLowerCase()}-${agent}`;
 /** The open cards with this run's added first. */
 const withRun = (open: string[] | null, id: string) => [id, ...(open ?? []).filter(x => x !== id)];
 /** A card click: open the run's card, or close it and any Stop it was asking to confirm. */
@@ -268,8 +271,29 @@ async function openPane($: Engine, focus = true) { const placed = await $.ui.ope
         $.ui.toast(toastCount > 1 ? `${toastCount} Stampede updates` : toastState.wakeLimitToastPending ? 'Stampede wake paused (limit) — use Wake now in the band' : pending[0]!.text);
       }
       await flush($);
+      const latest = await state($);
+      for (const [id, open] of Object.entries(latest.transcripts ?? {})) {
+        const agent = latest.runs[open.runId]?.agents.find((a: any) => a.name === open.agent);
+        if (!open.fetched || !agent || isLive(agent) || agent.status !== open.status) await refreshTranscript($, id);
+      }
     } catch (error) { await change($, s => ({ ...s, hub: { ...s.hub, ok: false, lastError: String(error) } })); }
     finally { polling = false; }
+  }
+  // An agent's transcript in a pane of its own (a tab beside the workflows'),
+  // fetched from the hub when opened and while the agent works.
+  async function openTranscript($: Engine, runId: string, agent: string) {
+    const held = await state($), found = held.runs[runId]?.agents.find((a: any) => a.name === agent);
+    const id = transcriptPane(runId, agent), title = clean(found?.label && found.label !== agent ? found.label : agent, 60);
+    await change($, s => ({ ...s, transcripts: { ...s.transcripts, [id]: s.transcripts?.[id] ?? { runId, agent, title, backend: found?.backend ?? '', model: found?.model ?? null, status: '', entries: [], omitted: 0, fetched: false } } }));
+    await refreshTranscript($, id);
+    await $.ui.open({ id, title, focus: true });
+  }
+  async function refreshTranscript($: Engine, id: string) {
+    const open = (await state($)).transcripts?.[id]; if (!open) return;
+    try {
+      const { value } = await request($, `/v1/ui/transcript?runId=${encodeURIComponent(open.runId)}&agent=${encodeURIComponent(open.agent)}`);
+      await change($, s => s.transcripts?.[id] ? { ...s, transcripts: { ...s.transcripts, [id]: { ...s.transcripts[id]!, backend: value.backend, model: value.model, status: value.status, entries: value.entries, omitted: value.omitted, fetched: true } } } : s);
+    } catch { await change($, s => s.transcripts?.[id] ? { ...s, transcripts: { ...s.transcripts, [id]: { ...s.transcripts[id]!, fetched: true } } } : s); }
   }
   async function action($: Engine, tool: string, input: any) {
     const current = await $.state.get({ plugin: 'stampede', key: 'ui' });
@@ -375,6 +399,11 @@ export const register: Register = (on, options) => {
     if (!delegates(event.tools)) return result;
     return { sections: [...result.sections, { id: 'stampede:agent-comms', text: AGENT_COMMS, scope: 'session' as const }] };
   });
+  on('ui.close', async ($, event, next) => {
+    if (!event.id.startsWith(TRANSCRIPT)) return next(event);
+    await change($, s => { const { [event.id]: _closed, ...rest } = s.transcripts ?? {}; return { ...s, transcripts: rest }; });
+    return next(event);
+  });
   on('ui.close', { id: 'stampede' }, async ($, event, next) => {
     await change($, s => ({ ...s, paneOpen: false })); return next(event);
   });
@@ -418,6 +447,7 @@ export const register: Register = (on, options) => {
     else if (kind === 'finished') await change($, s => ({ ...s, finishedCollapsed: !s.finishedCollapsed }));
     else if (kind === 'clear') await change($, s => { const done = s.ownedRunIds.filter(runId => s.runs[runId]?.status === 'completed'); return { ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...done])].slice(-100), openRuns: s.openRuns ? s.openRuns.filter(runId => !done.includes(runId)) : null }; });
     else if (kind === 'open') { await change($, s => ({ ...s, openRuns: withRun(s.openRuns, id) })); await openPane($); }
+    else if (kind === 'agent') { const at = id.indexOf(':'); await openTranscript($, id.slice(0, at), id.slice(at + 1)); }
     return {};
   });
   // The band above the prompt: a row per run of this session, live ones and
@@ -478,6 +508,27 @@ export const register: Register = (on, options) => {
   // an Agent / Model / Context / Time table, then messages and controls.
   // Completed runs can be removed one by one or all at once; failed and
   // stopped ones stay listed.
+  on('ui.render', { component: 'Pane' }, async ($, event, next) => {
+    if (!event.requestId.startsWith(TRANSCRIPT) || event.surface !== 'terminal' && event.surface !== 'desktop') return next(event);
+    const held = await state($), open = held.transcripts?.[event.requestId], now = await $.clock.now();
+    const elements = $.ui.resolve(event) as any; const { Box, Text } = elements, desktop = event.surface === 'desktop';
+    if (!open) return <Text dimColor>This transcript is no longer open</Text>;
+    const run = held.runs[open.runId], agent = run?.agents.find((a: any) => a.name === open.agent);
+    const working = !!agent && isLive(agent) && cellState(agent, now) !== 'done';
+    const about = [clean(run?.name ?? open.runId, 60), open.model ? modelName({ model: open.model }) : open.backend, agent ? (agent.status === 'failed' ? 'Failed' : working ? 'Working' : 'Done') : ''].filter(Boolean).join(' · ');
+    return <Box flexDirection="column" gap={1}>
+      <Text dimColor wrap="truncate">{about}</Text>
+      {open.omitted > 0 && <Text dimColor>{`${open.omitted} earlier entr${open.omitted === 1 ? 'y' : 'ies'} not shown`}</Text>}
+      {!open.entries.length && <Text dimColor>{open.fetched ? 'Nothing yet' : 'Loading…'}</Text>}
+      {open.entries.map((entry, i) => entry.kind === 'prompt'
+        ? <Box key={`entry-${i}`} paddingX={1} {...(desktop ? { ...ROUNDED, backgroundColor: '#80808024' } : { borderStyle: 'round', borderDimColor: true })}><Text wrap="wrap">{entry.text}</Text></Box>
+        : entry.kind === 'text' ? <elements.Markdown key={`entry-${i}`} text={entry.text} />
+        : entry.kind === 'tool' ? <Box key={`entry-${i}`} gap={1}><Text dimColor>{entry.tool}</Text><Box flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{entry.text}</Text></Box></Box>
+        : entry.kind === 'error' ? <Text key={`entry-${i}`} color="error" wrap="wrap">{entry.text}</Text>
+        : <Text key={`entry-${i}`} dimColor bold>{entry.text}</Text>)}
+      {working && <Text dimColor>Working…</Text>}
+    </Box>;
+  });
   on('ui.render', { component: 'Pane', requestId: 'stampede' }, async ($, event, next) => {
     if (event.surface !== 'terminal' && event.surface !== 'desktop') return next(event);
     const held = await state($); const elements = $.ui.resolve(event) as any;
@@ -552,10 +603,14 @@ export const register: Register = (on, options) => {
                 // Skipping or retrying an agent is the orchestrator's call (agent_control), not a row's.
                 const failed = a.status === 'failed', finished = cellState(a, now) === 'done' || a.status === 'cancelled';
                 return <Box key={`${id}:${a.name}`} gap={1} flexDirection={stacked ? 'column' : 'row'}>
-                  <Box flexGrow={1} flexShrink={1} minWidth={0}><Text {...(failed ? { color: 'error' } : { dimColor: dim || finished })} wrap="truncate">{clean(a.label && a.label !== a.name ? a.label : a.name, 40)}{a.error && !failed && !finished ? <Text color="warning">{'  Retrying'}</Text> : ''}</Text></Box>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}>{desktop
+                    ? <elements.Client key={`agent-row-${id}-${a.name}`} module="./row.tsx" flexGrow={1} props={{ id: `agent:${id}:${a.name}`, title: [{ text: clean(a.label && a.label !== a.name ? a.label : a.name, 40), ...(failed ? { color: 'error' as const } : dim || finished ? { dim: true as const } : {}) }, ...(a.error && !failed && !finished ? [{ text: '  Retrying', color: 'warning' as const }] : [])] }} />
+                    : <Box gap={1} minWidth={0}><Box flexShrink={1} minWidth={0}><Text {...(failed ? { color: 'error' } : { dimColor: dim || finished })} wrap="truncate">{clean(a.label && a.label !== a.name ? a.label : a.name, 40)}{a.error && !failed && !finished ? <Text color="warning">{'  Retrying'}</Text> : ''}</Text></Box><Button key={`transcript-${id}-${a.name}`} plain onPress={() => { void openTranscript($, id, a.name); }}>›</Button></Box>}</Box>
                   {!stacked && showModel && col(modelName(a), 10)}
                   {!stacked && col(a.context ? tokens(a.context.tokens) : '—', 7, contextFull(a) ? 'warning' : undefined)}
-                  {!stacked && col(agentTime(a, now) || '—', 7)}
+                  {!stacked && (desktop && !finished && !failed && a.startedAt
+                    ? <Box width={7} flexShrink={0}><elements.Client key={`agent-time-${id}-${a.name}`} module="./row.tsx" flexGrow={1} props={{ id: 'clock:', title: [{ text: agentTime(a, now) || '—', dim: true, since: { from: a.startedAt, now } }] }} /></Box>
+                    : col(agentTime(a, now) || '—', 7))}
                   {stacked && <Text dimColor>{`  ${a.context ? `${tokens(a.context.tokens)} context · ` : ''}${agentTime(a, now) || '—'}`}</Text>}
                 </Box>;
               })}
@@ -581,7 +636,7 @@ export const register: Register = (on, options) => {
         </Box>;
       if (desktop) return <Box key={`card-${r.runId}`} flexDirection="column" {...CARD} {...(open ? {} : { hover: { backgroundColor: CARD_HOVER } })}>
         <Box gap={1} alignItems="flex-start">
-          <elements.Client key={`head-${r.runId}`} module="./row.tsx" flexGrow={1} props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 60), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, ...(r.status === 'running' ? [] : [{ text: `${statusLabel(r.status)}  `, ...(r.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: `${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)}  ${runTime(r, now)}`, dim: true }] }} />
+          <elements.Client key={`head-${r.runId}`} module="./row.tsx" flexGrow={1} props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 60), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, ...(r.status === 'running' ? [] : [{ text: `${statusLabel(r.status)}  `, ...(r.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: `${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)}  `, dim: true }, { text: runTime(r, now), dim: true, ...(!done && r.startedAt ? { since: { from: r.startedAt, now } } : {}) }] }} />
           {control}
         </Box>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}

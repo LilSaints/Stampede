@@ -100,6 +100,9 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     const live = await call('workflow_run', { cwd, script: meta + 'return await parallel([() => agent("first", { name: "first" }), () => agent("x".repeat(25000), { name: "big" }), () => agent("hang", { name: "waiting" })]);', orchestratorSessionId: 'owner' });
     for (let i = 0; i < 200 && !['first', 'big'].every(name => hub.manager.get(live.runId).agents.find(a => a.name === name)?.status === 'done'); i++) await new Promise(r => setTimeout(r, 20));
     assert.deepEqual(await call('workflow_result', { runId: live.runId, agent: 'first' }), { agent: 'first', status: 'done', result: 'first' });
+    // Its transcript, for the pane: the prompt the turn began with, then what it wrote.
+    const transcript: any = await (await fetch(`${base}/v1/ui/transcript?runId=${live.runId}&agent=first`, { headers: { authorization: `Bearer ${hub.token}` } })).json();
+    assert.deepEqual(transcript.entries, [{ kind: 'prompt', text: 'first' }, { kind: 'text', text: 'first' }]);
     // A long result comes as a preview, the whole value in its file.
     const big = await call('workflow_result', { runId: live.runId, agent: 'big' });
     assert.match(big.result, /^"x+…\(\+5002 chars\)$/);
