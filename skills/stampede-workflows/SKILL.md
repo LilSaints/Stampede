@@ -5,7 +5,7 @@ description: Author and run Stampede JavaScript workflows that coordinate Claude
 
 # Stampede workflows
 
-Start a run with `workflow_run`, supplying exactly one of `script`, `scriptPath`, or saved workflow `name`, plus an absolute `cwd`. It returns immediately. With the mod enabled, terminal results, messages and agents that fail for good wake this session; do not poll. Without the mod, use `workflow_wait`, then `workflow_result`. `workflow_result` with `agent` reads one agent's stored result at any time, so finished work can be inspected while the run goes on. `workflow_messages` reads messages for the orchestrator. `workflow_send` replies to an agent or broadcasts to `*`.
+Start a run with `workflow_run`, supplying exactly one of `script`, `scriptPath`, or saved workflow `name`, plus an absolute `cwd`. It returns immediately. With the mod enabled, terminal results, messages and agents that fail for good wake this session; do not poll. Without the mod, use `workflow_wait`, then `workflow_result`. `workflow_result` with `agent` reads one agent's stored result at any time, so finished work can be inspected while the run goes on. To also be woken as agents finish, start the run with `notifyAgents: true`, or pass `notify: true` to the `agent()` calls that matter (`notify: false` opts one out); each wake names the agents, not their results. `workflow_messages` reads messages for the orchestrator. `workflow_send` replies to an agent or broadcasts to `*`.
 
 Scripts are plain JavaScript. Their first statement must be a literal metadata export:
 

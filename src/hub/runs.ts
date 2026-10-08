@@ -35,7 +35,7 @@ interface AgentContext {
   shared: { reads: string[]; writes: string[] };
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
-export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; limits?: Partial<Config['limits']> }
+export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
 export class RunManager extends EventEmitter {
@@ -76,7 +76,7 @@ export class RunManager extends EventEmitter {
     return this.eventMutex.run(async () => {
       if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
-      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
+      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.done'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
       await this.store.append(path.join(this.store.runDir(run.id), 'events.jsonl'), event);
       await this.store.write(path.join(this.store.runDir(run.id), 'run.json'), run);
@@ -108,7 +108,7 @@ export class RunManager extends EventEmitter {
     const id = `run_${ulid()}`; const directory = this.store.runDir(id);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const scriptPath = path.join(directory, 'script.js'); await writeFile(scriptPath, source, { mode: 0o600 });
-    const run: Run = { id, name: parsed.meta.name, cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
+    const run: Run = { id, name: parsed.meta.name, cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
     run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
@@ -124,7 +124,7 @@ export class RunManager extends EventEmitter {
   }
   async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string }) {
     const old = this.get(id); if (!runTerminal(old.status)) throw new Error('only terminal runs may be resumed');
-    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId }, id);
+    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents }, id);
   }
   async control(id: string, action: string) {
     const run = this.get(id), execution = this.active.get(id);
@@ -260,6 +260,7 @@ export class RunExecution {
     if (opts.maxResumes !== undefined && (!Number.isInteger(opts.maxResumes) || opts.maxResumes < 0 || opts.maxResumes > this.config.limits.maxResumesPerAgent)) throw new Error('maxResumes must be an integer within the configured limit');
     if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
     if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
+    if (opts.notify !== undefined && typeof opts.notify !== 'boolean') throw new Error('notify must be a boolean');
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
     if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
@@ -321,7 +322,9 @@ export class RunExecution {
     const agentType = c.agent.backend === 'codex' && c.opts.agentType ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const model = c.opts.model ?? agentType?.model ?? (c.agent.backend === 'codex' ? this.config.codex.defaultModel : undefined);
     const effort = c.opts.effort ?? agentType?.effort ?? (c.agent.backend === 'codex' ? this.config.codex.defaultEffort : undefined);
-    c.key = hash(canonical({ spec: { prompt: c.prompt, ...c.opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
+    // Whether the orchestrator hears of it changes nothing the agent does.
+    const { notify: _notify, ...opts } = c.opts;
+    c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
     if (previousKey !== c.key) c.occ = this.cache.next(c.key);
     c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && c.agent.access !== 'full' && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
     if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
@@ -473,6 +476,8 @@ export class RunExecution {
     await this.status(c, status); await this.bus.terminate(c.agent.name); c.release?.(c.agent.id); c.release = undefined;
     if (c.key !== undefined) await this.manager.store.append(path.join(this.manager.store.runDir(this.run.id), 'journal.jsonl'), { key: c.key, occ: c.occ, agentId: c.agent.id, backend: c.agent.backend, status, result: c.agent.result ?? null, inputs: c.inputs, cacheable: c.cacheable ?? false, tainted: c.tainted, shared: c.shared, externalTools: c.agent.externalTools ?? [], effects: c.agent.workspace, usage: c.agent.usage });
     c.token = ''; c.resolve(status === 'done' ? c.agent.result : null);
+    // An opted-in agent's own work wakes the orchestrator; a result replayed from the cache does not.
+    if (status === 'done' && !c.cached && (c.opts.notify ?? this.run.notifyAgents)) await this.event('agent.done', { name: c.agent.name, label: c.agent.label, phase: c.agent.phase });
   }
   scheduleResumes() {
     if (this.run.status !== 'running' || this.draining || !this.budgetAvailable()) return;

@@ -9,6 +9,8 @@ export interface AgentOpts {
   backend?: 'claude' | 'codex'; label?: string; name?: string; role?: string; phase?: string; schema?: Record<string, any>; model?: string; effort?: string;
   isolation?: 'worktree' | 'shared'; access?: 'read-only' | 'edit' | 'full'; cwd?: string; agentType?: string; timeoutMs?: number; maxResumes?: number;
   comms?: boolean | { canMessage?: string[] | '*'; autoDoneOnIdle?: boolean }; cache?: 'auto' | 'never'; cacheInputs?: string[]; appendSystemPrompt?: string;
+  /** Wake the orchestrator when this agent is done; overrides the run's `notifyAgents`. Not part of the cache key. */
+  notify?: boolean;
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';
@@ -29,6 +31,8 @@ export interface Run {
   phases: NonNullable<Meta['phases']>; createdAt: string; startedAt?: string; endedAt?: string; result?: unknown; error?: { message: string; stack?: string };
   budget: { totalTokens: number | null; spentTokens: number; totalUsd: number | null; spentUsd: number };
   counters: { agentsStarted: number; agentsRunning: number; messages: number }; orchestratorSessionId?: string;
+  /** Wake the orchestrator as each agent is done, unless its call says `notify: false`. */
+  notifyAgents?: boolean;
   agents: Agent[]; log: string[]; phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
   cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };

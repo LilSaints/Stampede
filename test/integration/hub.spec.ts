@@ -106,6 +106,24 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     assert.equal((await call('workflow_result', { runId: live.runId, agent: 'waiting' })).result, undefined);
     assert.equal(hub.manager.get(live.runId).status, 'running');
     await call('workflow_control', { runId: live.runId, action: 'cancel' });
+    // Done agents notify only when opted in: per call, or for the run unless a call opts out.
+    const done = (runId: string) => (hub.manager.get(runId).notifications ?? []).filter(n => n.type === 'agent.done').map(n => n.data.name);
+    assert.deepEqual(done(live.runId), []);
+    const notifyScript = path.join(root, 'notify.js');
+    await writeFile(notifyScript, meta + 'return await parallel([() => agent("one", { name: "one" }), () => agent("two", { name: "two", notify: false }), () => agent("three", { name: "three", notify: true })]);');
+    const notified = await call('workflow_run', { cwd, scriptPath: notifyScript, notifyAgents: true, orchestratorSessionId: 'owner' });
+    await waitRun({ runId: notified.runId, timeoutSec: 5 });
+    assert.deepEqual(done(notified.runId).sort(), ['one', 'three']);
+    const perCall = await call('workflow_run', { cwd, script: meta + 'return await parallel([() => agent("four", { name: "four", notify: true }), () => agent("five", { name: "five" })]);', orchestratorSessionId: 'owner' });
+    await waitRun({ runId: perCall.runId, timeoutSec: 5 });
+    assert.deepEqual(done(perCall.runId), ['four']);
+    // Results replayed from the cache wake no one, and notify is not part of the cache key.
+    await writeFile(notifyScript, meta + 'return await parallel([() => agent("one", { name: "one", notify: true }), () => agent("two", { name: "two" }), () => agent("three", { name: "three" })]);');
+    const replay = await call('workflow_resume', { runId: notified.runId, scriptPath: notifyScript });
+    await waitRun({ runId: replay.runId, timeoutSec: 5 });
+    assert.equal(hub.manager.get(replay.runId).cacheHits, 3);
+    assert.equal(hub.manager.get(replay.runId).notifyAgents, true);
+    assert.deepEqual(done(replay.runId), []);
     // An agent that fails its last attempt is a notification, so the mod wakes the orchestrator mid-run.
     const lost = await call('workflow_run', { cwd, script: meta + 'return await agent("crash", { name: "lost" });', orchestratorSessionId: 'owner' });
     await waitRun({ runId: lost.runId, timeoutSec: 5 });

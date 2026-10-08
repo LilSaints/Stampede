@@ -134,6 +134,27 @@ test('an agent that fails for good wakes the orchestrator mid-run with a toast',
   expect(state.toastPending?.[0]?.text).toBe('review: explore-projects failed');
   expect(wakeSummary(wakePrompt(state), state.runs)).toBe('review: explore-projects failed');
 });
+test('opted-in done agents ride last in a wake, go with their run, and keep a reserve of the hour', async () => {
+  const snapshot = { hubSeq: 4, uiApiVersion: 1, runs: [{ ...run(), name: 'review' }] };
+  const doneEvent = (hubSeq: number, name: string) => ({ runId: 'owned', hubSeq, type: 'agent.done', data: { name } });
+  const message = { runId: 'owned', hubSeq: 3, type: 'message.accepted', data: { from: 'critic', to: 'orchestrator', seq: 1, text: 'look' } };
+  let state = reduce(initialState(), snapshot, [doneEvent(1, 'one'), doneEvent(2, 'two'), message], 'owner', 100);
+  expect(state.pendingWake[0]!.text).toBe('run owned "review": agent one is done. workflow_result with agent reads its result.');
+  expect(state.toastPending?.length).toBe(1);
+  const lines = wakePrompt(state).split('\n').filter(line => line.startsWith('- run '));
+  expect(lines[0]!.includes('message from critic')).toBe(true);
+  expect(wakeSummary(wakePrompt(state), state.runs)).toBe('review: message from critic · review: one done · review: two done');
+  // Done lines alone wake while the hour keeps two wakes in reserve, and wait past that.
+  state = reduce(initialState(), snapshot, [doneEvent(1, 'one')], 'owner', 100);
+  const max = state.uiConfig.maxWakesPerHour;
+  expect(shouldWake({ ...state, wakeTimes: Array(max - 3).fill(100) }, 20000)).toBe(true);
+  expect(shouldWake({ ...state, wakeTimes: Array(max - 2).fill(100) }, 20000)).toBe(false);
+  expect(shouldWake({ ...state, wakeTimes: Array(max - 2).fill(100) }, 20000, true)).toBe(true);
+  expect(reduce({ ...state, wakeTimes: Array(max).fill(100) }, snapshot, [], 'owner', 200).wakeLimitToastPending).toBeFalsy();
+  // The run's end carries its agents' results, so their done lines go.
+  state = reduce(state, snapshot, [{ runId: 'owned', hubSeq: 4, type: 'run.status', data: { status: 'completed' } }], 'owner', 300);
+  expect(state.pendingWake.map(w => w.kind)).toEqual(['run.terminal']);
+});
 test('wake ownership and seen cursors are session-specific', async () => {
   const events = [
     { runId: 'owned', hubSeq: 1, type: 'run.status', data: { status: 'completed' } },
