@@ -7,15 +7,18 @@ import { workerEnv } from '../dist/src/backends/procs.js';
 // No credentials are copied and no model prompts are submitted. Installation
 // is confined to a disposable CLAUDE_CONFIG_DIR, with an isolated working dir.
 const output = path.resolve(process.argv[2] ?? `spikes/artifacts/s17-package-${Date.now()}`);
+// Optional bundle directory lets qualification use fresh release candidates
+// while another long-running probe retains its original dist files.
+const runtimeDirectory = path.resolve(process.argv[3] ?? 'dist');
 await mkdir(output, { recursive: true });
 const fixture = await mkdtemp(path.join(os.tmpdir(), 'stampede-package-'));
 const plugin = path.join(fixture, 'plugin'), config = path.join(fixture, 'claude'), home = path.join(fixture, 'state'), cwd = path.join(fixture, 'workspace');
 for (const directory of [plugin, config, home, cwd]) await mkdir(directory);
-const result = { at: new Date().toISOString(), fixture };
+const result = { at: new Date().toISOString(), fixture, runtimeDirectory };
 let descriptor, token;
 try {
   for (const file of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json', 'hooks/hooks.json', 'hooks/stampede-ui.tsx', 'types/index.d.ts', 'skills/stampede-workflows/SKILL.md', 'dist/cli.js', 'dist/worker.js', 'dist/hook.js', 'dist/windows-helper.ps1']) {
-    const target = path.join(plugin, file); await mkdir(path.dirname(target), { recursive: true }); await copyFile(file, target);
+    const target = path.join(plugin, file); await mkdir(path.dirname(target), { recursive: true }); await copyFile(file.startsWith('dist/') ? path.join(runtimeDirectory, file.slice(5)) : file, target);
   }
   const version = JSON.parse(await readFile('package.json', 'utf8')).version;
   await writeFile(path.join(plugin, 'package.json'), JSON.stringify({ name: 'stampede', version, type: 'module' }));
