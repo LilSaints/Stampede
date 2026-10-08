@@ -19,11 +19,12 @@ test('Windows hub repairs explicit and inherited ACL grants and doctor rejects u
   };
   const verify = async () => {
     const rows = JSON.parse(await ps(`$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
+      $resolvedRoot=(Get-Item -LiteralPath $env:STAMPEDE_ACL_FIXTURE).FullName;
       $items=@(Get-Item -LiteralPath $env:STAMPEDE_ACL_FIXTURE)+@(Get-ChildItem -LiteralPath $env:STAMPEDE_ACL_FIXTURE -Recurse -Force);
       @($items | ForEach-Object { $acl=Get-Acl -LiteralPath $_.FullName; $rules=@($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]));
-        @{root=($_.FullName -eq $env:STAMPEDE_ACL_FIXTURE); protected=$acl.AreAccessRulesProtected; count=$rules.Count;
+        @{path=$_.FullName; root=($_.FullName -eq $resolvedRoot); protected=$acl.AreAccessRulesProtected; count=$rules.Count;
           own=($rules.Count -eq 1 -and $rules[0].IdentityReference.Value -eq $sid); inherited=$rules[0].IsInherited; full=($rules[0].FileSystemRights -eq 'FullControl')} }) | ConvertTo-Json -Compress`));
-    for (const row of rows) { assert.equal(row.count, 1); assert.equal(row.own, true); assert.equal(row.full, true); assert.equal(row.protected, row.root); assert.equal(row.inherited, !row.root); }
+    for (const row of rows) { const detail = JSON.stringify(row); assert.equal(row.count, 1, detail); assert.equal(row.own, true, detail); assert.equal(row.full, true, detail); assert.equal(row.protected, row.root, detail); assert.equal(row.inherited, !row.root, detail); }
   };
   const config = defaults(); const unavailable = { available: false, capabilities: {} };
   const boot = () => startHub({ home, config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: unavailable, codex: unavailable } });
