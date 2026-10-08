@@ -1,13 +1,17 @@
 {
   "name": "stampede",
-  "version": "0.1.0",
+  "version": "1.0.0-rc.1",
   "private": true,
   "description": "Deterministic local multi-agent workflows for Claude Code and Codex",
   "type": "module",
-  "engines": { "node": ">=22" },
-  "bin": { "stampede": "dist/cli.js" },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "stampede": "dist/cli.js"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs",
     "test": "npm run build && node --test dist/test/**/*.spec.js",
     "check": "tsc -p tsconfig.json --noEmit"
   },
@@ -19,5 +23,9 @@
     "smol-toml": "^1.0.0",
     "ulid": "^3.0.0"
   },
-  "devDependencies": { "@types/node": "^24.0.0", "typescript": "~5.9.0" }
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "0.28.2",
+    "typescript": "~5.9.0"
+  }
 }

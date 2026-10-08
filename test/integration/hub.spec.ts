@@ -7,7 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
-import type { BackendInfo } from '../../src/hub/capabilities.js';
+import { capture, type BackendInfo } from '../../src/hub/capabilities.js';
 import { atomicJson, readJson } from '../../src/hub/store.js';
 const meta = 'export const meta = { name: "fixture", description: "integration" };\n';
 test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 30000 }, async () => {
@@ -85,6 +85,11 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     assert.equal(execution.bus.pending('limited'), 2);
     assert.equal(execution.bus.messages.filter(m => m.kind === 'system').length, 1);
     assert.equal(execution.run.agents[0].resumes, 0);
+    const hook = await capture(process.execPath, [path.resolve('dist/hook.js'), 'post-tool-use', '--backend', 'claude'], undefined, { ...process.env, STAMPEDE_HUB_URL: base, STAMPEDE_AGENT_TOKEN: execution.contexts.get('limited')!.token });
+    assert.equal(hook.code, 0);
+    const hookContext = JSON.parse(hook.stdout).hookSpecificOutput.additionalContext;
+    assert.match(hookContext, /first pending/); assert.match(hookContext, /second pending/);
+    assert.ok(execution.bus.deliveries.filter(d => d.recipient === 'limited').every(d => d.state === 'handed'));
     await call('workflow_control', { runId: limited.runId, action: 'cancel' });
     config.scheduler.codex.maxConcurrent = 1;
     const auth = await call('workflow_run', { cwd: path.resolve('.'), script: meta + 'return await parallel([()=>agent("auth"),()=>agent("auth"),()=>agent("auth"),()=>agent("auth")]);' });

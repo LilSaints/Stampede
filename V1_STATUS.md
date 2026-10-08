@@ -1,6 +1,6 @@
 # V1 implementation status
 
-2026-10-08. M0–M5 implementation is present; V1 release acceptance is still pending. M6 live steering and Appendix A preemption are excluded. No release tag has been created.
+2026-10-08. Release candidate `1.0.0-rc.1`: M0–M5 implementation is present; V1 release acceptance is still pending. M6 live steering and Appendix A preemption are excluded. No release tag has been created.
 
 ## Implemented
 
@@ -20,15 +20,17 @@
 - Core and installed-host mod TypeScript checks pass. Strict plugin validation passes.
 - Real Claude-to-Codex schema pipeline and mixed-backend coordination team pass.
 - Eight concurrent Codex conversations over three waves (24 turns) pass with shared home and correct resume identity.
-- Actual terminal plugin session records ownership, submits one attributed completion wake, retrieves result 42, advances its seen cursor and renders `/stampede`.
+- Actual terminal plugin sessions record ownership, submit one attributed completion wake, retrieve result 42, advance the seen cursor and render `/stampede`. A zero-model-call host probe also passed outside-project state access, hot-reload timer re-registration, hub restart reconnection and the version-mismatch banner.
 - Doctor verifies the exact state ACL, workspace-write readiness and denial of a synthetic protected-state read. Init, duplicate-hub handling, refused active restart, forced restart recovery and retention passed the maintenance probe.
 
 See [spikes/RESULTS.md](spikes/RESULTS.md) for the capability matrix, selected fallbacks and local evidence paths. Raw artifacts, credentials, CLI session output, generated declarations and local Claude settings remain ignored.
 
+- Self-contained release bundles install in an isolated Claude configuration with no `node_modules`; the installed MCP connects and a bundled workflow returns 42. Generated disable settings remove the installed orchestrator MCP from workers. No credentials were copied.
+- Dedicated hook startup: 30 launches, p95 149.56 ms. The bundled full-CLI path missed the target, so workers use `dist/hook.js`. Its real claim/print/ack transport passes integration testing.
+
 ## Remaining release gates
 
-1. Complete the live host checklist: Claude desktop Code tab transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner; live terminal layouts at 40/100/160 and hot-reload timer re-registration. Renderer fixtures do not establish actual host painting or reload behavior. Available computer-control tools cannot operate the desktop Code tab; user verification has been requested.
-2. Finish the outstanding real-host portions of S-14–S-19, including installed-plugin recursion exclusion. See the probe matrix for explicitly unmeasured cases. Network behavior remains unverified under the conservative S-25 fallback.
-3. Review acceptance evidence, then create a versioned release with the built `dist/` artifacts included as required by the spec. Development checkouts build with `npm ci` and `npm run build`.
+1. Complete the live host checklist: Claude desktop Code tab transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner; live terminal layouts and every action at 40/100/160. Renderer fixtures cover these sizes and actions, but do not establish actual host painting. Available computer-control tools cannot operate the desktop Code tab; user verification has been requested.
+2. Review acceptance evidence, then create a versioned release with `dist/cli.js`, `dist/worker.js`, `dist/hook.js` and `dist/windows-helper.ps1` committed as required by the spec. Development checkouts build with `npm ci` and `npm run build`.
 
 The code is reviewable and the automated checks pass. These outstanding gates prevent declaring the original “Finish V1” goal complete.

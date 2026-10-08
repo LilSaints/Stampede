@@ -294,7 +294,7 @@ export class RunExecution {
     const dir = this.agentDir(a); await mkdir(dir, { recursive: true, mode: 0o700 });
     const mcpPath = path.join(dir, 'mcp.json'), settingsPath = path.join(dir, 'settings.json');
     await this.manager.store.write(mcpPath, { mcpServers: a.comms.enabled ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token } } } : {} });
-    const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${this.manager.cliEntry}" hook ${event} --backend claude`, timeout: 5 });
+    const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${path.join(path.dirname(this.manager.cliEntry), 'hook.js')}" ${event} --backend claude`, timeout: 5 });
     const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name)));
     const deniedRoots = [this.manager.store.home, ...otherWorktrees];
     await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: deniedRoots.flatMap(root => ['Read', 'Edit', 'Write'].map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, ...(a.comms.enabled ? { hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } } : {}) });

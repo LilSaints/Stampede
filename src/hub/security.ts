@@ -22,7 +22,7 @@ export class Security {
     if (process.platform === 'win32') {
       try {
         const binary = await findExecutable('pwsh').catch(() => findExecutable('powershell'));
-        this.helper = spawn(binary, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', fileURLToPath(new URL('../../../src/hub/windows-helper.ps1', import.meta.url)), '-Serve'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PSModulePath: '' } });
+        this.helper = spawn(binary, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', fileURLToPath(new URL('./windows-helper.ps1', import.meta.url)), '-Serve'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, PSModulePath: '' } });
         let tail = '';
         this.helper.stderr.on('data', d => { tail = (tail + d).slice(-2000); });
         await new Promise<void>((resolve, reject) => {

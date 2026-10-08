@@ -2,7 +2,7 @@
 
 A local Claude Code plugin for JavaScript workflows over Claude Code and Codex workers. A loopback hub owns runs, worktrees, messages and cached results; the mod provides the pane and session-specific completion wakes.
 
-V1 is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
+Release candidate `1.0.0-rc.1` is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
 
 ## Development installation
 
@@ -16,6 +16,8 @@ node dist/cli.js doctor
 claude plugin marketplace add C:\Dev\Stampede
 claude plugin install stampede@stampede --scope user
 ```
+
+The build produces self-contained CLI, workflow-worker and hook bundles plus the Windows helper; an installed plugin does not need development dependencies. Version coupling is checked during the build.
 
 Use `/reload-plugins` in an existing Claude session. For development, use `claude --plugin-dir C:\Dev\Stampede`. The plugin auto-starts the hub when its MCP server connects. `init` previews the Codex defaults it reads from the user's config and asks before writing Stampede's config. State defaults to `~/.stampede`; set `STAMPEDE_HOME` consistently for the CLI and plugin to use another directory.
 

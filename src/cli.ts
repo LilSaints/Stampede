@@ -1,11 +1,10 @@
 import { parseArgs } from 'node:util';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { readJson, Store } from './hub/store.js';
 import { stampedeHome, loadConfig, VERSION } from './hub/config.js';
 const { values, positionals } = parseArgs({ allowPositionals: true, options: { role: { type: 'string' }, backend: { type: 'string' }, version: { type: 'boolean' }, help: { type: 'boolean' }, yes: { type: 'boolean' }, worktrees: { type: 'boolean' }, restart: { type: 'boolean' }, force: { type: 'boolean' } } });
-const entry = fileURLToPath(new URL('../cli.js', import.meta.url));
+const entry = path.resolve(process.argv[1]);
 try {
   if (values.version) process.stdout.write(VERSION + '\n');
   else if (values.help || !positionals.length) process.stdout.write('Stampede: init [--yes] | doctor | gc [--worktrees] [--yes] | hub [--restart] [--force] | mcp --role orchestrator|agent | hook post-tool-use|stop --backend claude\n');

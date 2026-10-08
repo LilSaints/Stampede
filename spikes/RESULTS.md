@@ -161,3 +161,16 @@ Additional local evidence (ignored, not published):
 - `artifacts/terminal-ui-20261008/`: real terminal run and seen-cursor state. Session `4d1bdbe1-7f6b-4ca3-aab9-f9750cd2ebef`, run `run_01M4D2RES17PR4XS6D96B18TDV`, result 42. The probe session exited and its hub was shut down.
 
 The 15 mod tests and 27 core tests pass. The integration suite additionally verifies that mark_done does not publish an early result: an observation times out with null, run-end drain then stores the delayed final answer. No actual Claude calls were made after the terminal reported 98% weekly usage. Outstanding host checks are tracked in `V1_STATUS.md`; this matrix is not a claim that unperformed probes passed.
+
+## Host and standalone packaging completion
+
+A further zero-model-call terminal probe (session `4118bc99-6336-4978-9b34-ff6b4fd92657`) passed S-14's outside-project state access and S-19's hot reload: the live mod reloaded seven hooks and its timer reconnected from the old hub port to a newly started hub on a different port. An authenticated UI fixture then advertised UI API 999; the actual terminal pane displayed the version-mismatch banner. Both fixtures exited and their temporary state was removed. Evidence: `artifacts/host-probe.json`. These results supersede the earlier pending terminal cells; desktop and manual multi-width/action checks remain pending.
+
+S-17 now passes for an actual isolated installation. `s17-package.mjs` installs the plugin into a disposable `CLAUDE_CONFIG_DIR` and separate plugin cache, without credentials or `node_modules`. The enabled control reports `plugin:stampede:stampede` Connected; the generated `enabledPlugins` override yields No MCP servers configured. The packaged hub's worker returns 42. Both the initial corrected probe and the final `1.0.0-rc.1` candidate pass; temporary installations and hubs were removed. Evidence: `artifacts/s17-package-rc1-20261008/summary.json`. The first attempt used an invalid combination of qualified plugin name and `--marketplace`; it failed before installation and was corrected.
+
+Packaging revealed two issues, both corrected before release qualification:
+
+- Plain TypeScript output depended on the development dependency tree. `scripts/build.mjs` now bundles the CLI, workflow worker and hook, copies the Windows helper, and verifies package/plugin/hub/UI-major version coupling. The standalone installation probe proves the resulting four runtime files work without `node_modules`.
+- The bundled full CLI hook measured 182.31 ms p95 during the concurrent core-suite run, missing the 150 ms target. Workers now invoke the dedicated `dist/hook.js` entry. A subsequent 30-launch measurement gives median 123.54 ms, p95 149.56 ms and max 168.09 ms (startup only, hub round trip excluded). Evidence: `artifacts/s13-dedicated-20261008/summary.json`. Integration also verifies this entry prints two actual claimed messages and only then acknowledges both as handed.
+
+The final post-packaging core run passed 27 tests; the dedicated-hook change additionally passed the targeted hub integration test. Strict plugin validation and both TypeScript projects pass for the release candidate. The 15 mod tests passed on the unchanged UI code. These are still qualification results, not a final release declaration.
