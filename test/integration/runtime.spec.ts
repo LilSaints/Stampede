@@ -7,6 +7,49 @@ import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
 
 const meta = 'export const meta={name:"runtime acceptance",description:"fake backend checks"};\n';
+test('invalid teams leave no partial members, counters or reservations', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-team-validation-'));
+  const cwd = path.join(root, 'work'); await mkdir(cwd);
+  const config = defaults(); config.scheduler.maxConcurrent = 6; config.scheduler.perRun = 6;
+  const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-claude.mjs'), capabilities: {} };
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: fake, codex: { ...fake, capabilities: { mcpViaFlags: false } } } });
+  try {
+    const started = await hub.manager.start({ cwd, script: meta + `
+const errors=[];
+const members=[{name:'first',prompt:'unused',backend:'claude'},{name:'second',prompt:'unused',backend:'claude'}];
+for(const [roster,opts] of [
+  [[members[0],{...members[1],backend:'codex'}],{}],
+  [members,{topology:null}],
+  [members,{topology:{first:['second'],second:42}}],
+  [[members[0],{...members[1],name:123}],{}],
+  [[members[0],{...members[1],cwd:123}],{}]
+]) {try {await spawnTeam(roster,opts);} catch(error) {errors.push(error.message);}}
+return {errors,result:await agent('recovered',{name:'first',backend:'claude'})};` });
+    const execution = hub.manager.active.get(started.runId)!;
+    await execution.task;
+    assert.equal(execution.run.status, 'completed', JSON.stringify(execution.run.error));
+    const result = execution.run.result as any;
+    assert.equal(result.errors.length, 5);
+    assert.match(result.errors[0], /messaging is not qualified/);
+    assert.match(result.errors[1], /topology/);
+    assert.match(result.errors[2], /topology/);
+    assert.match(result.errors[3], /agent name/);
+    assert.match(result.errors[4], /cwd must be a string/);
+    assert.equal(result.result, 'recovered');
+    assert.equal(execution.run.counters.agentsStarted, 1);
+    assert.deepEqual(execution.run.agents.map(agent => agent.name), ['first']);
+    assert.equal(execution.teams.size, 0);
+    assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
+    assert.equal(hub.manager.scheduler.snapshot().queued.length, 0);
+    const named = await hub.manager.start({ cwd, script: meta + 'const t=await spawnTeam([{name:"constructor",prompt:"fixture:team",backend:"claude"}],{topology:{}}); await t.untilDone(undefined,{maxMs:10000}); return await t.results();' });
+    await hub.manager.active.get(named.runId)!.task;
+    const namedRun = hub.manager.get(named.runId);
+    assert.equal(namedRun.status, 'completed', JSON.stringify(namedRun.error));
+    assert.equal((namedRun.result as any).constructor.status, 'done', 'topology lookup must not use inherited object properties');
+    assert.deepEqual(namedRun.agents[0].comms.canMessage, ['orchestrator']);
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
 test('the last rate-limited attempt still cools down the backend', { timeout: 30000 }, async t => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-rate-limit-'));
   const cwd = path.join(root, 'work'); await mkdir(cwd);

@@ -242,12 +242,14 @@ export class RunExecution {
     for (const team of this.teams.values()) if (to === '*' || team.names.includes(to)) team.lastOrchestratorMessage = Date.now();
     return sent;
   }
-  private validate(prompt: string, opts: AgentOpts) {
+  private validate(prompt: string, opts: AgentOpts, team = false) {
     if (typeof prompt !== 'string') throw new Error('agent prompt must be a string');
     if (!this.budgetAvailable()) throw new Error('budget exhausted');
     const backend = opts.backend ?? this.run.defaultBackend;
     if (!['claude', 'codex'].includes(backend)) throw new Error('invalid backend');
     if (this.unavailable.has(backend)) throw new Error(`${backend} is unavailable for this run`);
+    if (backend === 'codex' && (team || opts.comms) && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('Codex messaging is not qualified for this CLI version; run stampede doctor and qualify the updated backend');
+    if (opts.cwd !== undefined && typeof opts.cwd !== 'string') throw new Error('agent cwd must be a string');
     if (opts.schema) { validateSchema(opts.schema); if (backend === 'codex') codexSchema(opts.schema); }
     if (opts.access && !['read-only', 'edit', 'full'].includes(opts.access)) throw new Error('invalid access level');
     if (opts.access === 'full' && !this.config.allowFullAccess) throw new Error("access 'full' disabled by config");
@@ -258,28 +260,28 @@ export class RunExecution {
     if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
     if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
-    if (opts.name && (!/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
+    if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
     const model = opts.model ?? (backend === 'codex' && opts.agentType ? this.config.codex.agentTypes[opts.agentType].model : undefined) ?? this.config.codex.defaultModel;
     if (backend === 'codex' && this.run.budget.totalUsd !== null && !this.config.pricing.codex?.[model]) throw new Error(`budgetUsd requires pricing for codex model ${model}`);
   }
   prepare(prompt: string, opts: AgentOpts, teamId?: string): AgentContext {
-    this.validate(prompt, opts);
+    this.validate(prompt, opts, Boolean(teamId));
     if (this.run.counters.agentsStarted >= 1000) throw new Error('1000-agent cap reached');
-    const n = ++this.run.counters.agentsStarted;
+    const n = this.run.counters.agentsStarted + 1;
     const backend = opts.backend ?? this.run.defaultBackend;
     const name = opts.name ?? `${(opts.label ?? backend).toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 32)}-${n}`;
     if (this.contexts.has(name)) throw new Error('duplicate agent name');
     const access = opts.access ?? (opts.isolation === 'worktree' ? 'edit' : 'read-only');
     const isolation = opts.isolation ?? (access === 'read-only' ? 'shared' : 'worktree');
     const enabled = Boolean(teamId || opts.comms);
-    if (backend === 'codex' && enabled && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('Codex messaging is not qualified for this CLI version; run stampede doctor and qualify the updated backend');
     const canMessage = typeof opts.comms === 'object' ? opts.comms.canMessage ?? '*' : '*';
     const agent: Agent = { id: `agt_${ulid()}`, runId: this.run.id, name, label: opts.label ?? name, role: opts.role, phase: opts.phase ?? this.run.phase, backend, mode: 'oneshot', comms: { enabled, canMessage }, access, workspace: { kind: isolation, path: path.resolve(this.run.cwd, opts.cwd ?? '.') }, status: 'queued', markedDone: false, usage: zeroUsage(), resumes: 0, stopBlocks: 0, lastActivityAt: now(), turns: [], teamId };
     if (agent.phase && !this.run.phases.some(phase => phase.title === agent.phase)) this.run.phases.push({ title: agent.phase });
     let resolve!: (value: unknown) => void; const done = new Promise(r => { resolve = r; });
     const token = randomBytes(32).toString('hex');
     const context: AgentContext = { agent, opts, prompt, abort: new AbortController(), token, tokenHash: hash(token), done, resolve, tainted: false, shared: { reads: [], writes: [] }, resumeScheduled: false, autoDone: typeof opts.comms === 'object' ? opts.comms.autoDoneOnIdle ?? !teamId : !teamId };
+    this.run.counters.agentsStarted = n;
     this.contexts.set(name, context); this.run.agents.push(agent);
     this.syncPeer(agent); return context;
   }
@@ -500,14 +502,17 @@ export class RunExecution {
     if (!Array.isArray(members) || !members.length || this.run.counters.agentsStarted + members.length > 1000) throw new Error('invalid team size');
     if (new Set(members.map(m => m.name)).size !== members.length || members.some(m => !m.name)) throw new Error('team names must be unique');
     if (opts.releaseIdleAfterMs !== undefined && (!Number.isFinite(opts.releaseIdleAfterMs) || opts.releaseIdleAfterMs < 0)) throw new Error('invalid releaseIdleAfterMs');
-    for (const member of members) this.validate(member.prompt, member);
+    for (const member of members) this.validate(member.prompt, member, true);
+    const topology = opts.topology;
+    if (topology !== undefined && topology !== 'mesh' && topology !== 'star' &&
+      (!topology || typeof topology !== 'object' || Array.isArray(topology) || Object.values(topology).some(peers => !Array.isArray(peers) || peers.some(peer => typeof peer !== 'string')))) throw new Error('invalid team topology');
     const id = `team_${ulid()}`, names = members.map(m => m.name);
     if (opts.topology === 'star' && !names.includes(opts.lead)) throw new Error('star topology requires a lead member');
     this.manager.scheduler.validate(members.map(m => ({ id: m.name, name: m.name, runId: this.run.id, backend: m.backend ?? this.run.defaultBackend, comms: true })));
     const team: Team = { id, names, createdAt: Date.now(), lastOrchestratorMessage: 0, releaseIdleAfterMs: opts.releaseIdleAfterMs };
     this.teams.set(id, team);
     const contexts = members.map(m => {
-      const allowed = opts.topology === 'star' ? m.name === opts.lead ? names.filter(n => n !== m.name) : [opts.lead] : typeof opts.topology === 'object' ? opts.topology[m.name] ?? [] : names.filter(n => n !== m.name);
+      const allowed = topology === 'star' ? m.name === opts.lead ? names.filter(n => n !== m.name) : [opts.lead] : typeof topology === 'object' ? Object.hasOwn(topology, m.name) ? topology[m.name] : [] : names.filter(n => n !== m.name);
       return this.prepare(m.prompt, { ...m, phase: m.phase ?? opts.phase, comms: { canMessage: [...allowed, 'orchestrator'], autoDoneOnIdle: false } }, id);
     });
     for (const c of contexts) await this.identifyCall(c);
