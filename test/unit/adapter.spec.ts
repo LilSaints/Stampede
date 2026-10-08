@@ -17,6 +17,9 @@ test('Codex resume preserves all options before the resume tail', () => {
   assert.ok(start.includes('mcp_servers.stampede.default_tools_approval_mode="approve"'));
   assert.ok(start.includes('approval_policy="never"'));
   assert.ok(!codexArgv({ ...a, developerInstructionsFlag: false }).some(arg => arg.startsWith('developer_instructions=')));
+  // Workers ignore the user's Codex config, so its approvals reviewer is passed only when configured.
+  assert.ok(!start.some(arg => arg.startsWith('approvals_reviewer=')));
+  assert.ok(codexArgv({ ...a, approvalsReviewer: 'user' }).includes('approvals_reviewer="user"'));
 });
 test('Claude read-only coordination permits messaging without file edits or shell tools', () => {
   const argv = claudeArgv({ ...launch('.'), backend: 'claude', comms: true });

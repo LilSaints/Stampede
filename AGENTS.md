@@ -24,7 +24,7 @@ Sessions run an installed copy, never this working tree: the `stampede` marketpl
 
 ```powershell
 npm run install-plugin
-Start-Process node -ArgumentList "$HOME\.claude\stampede-release\dist\cli.js", hub, --restart -WindowStyle Hidden
+node $HOME\.claude\stampede-release\dist\cli.js hub --restart --detach
 ```
 
 then `/reload-plugins` (or restart) in each open session, whose shims otherwise stay blocked on the old version. Try unreleased changes with `claude --plugin-dir C:\Dev\Stampede` instead.

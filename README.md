@@ -7,7 +7,7 @@ Stampede is a Claude Code plugin for running many AI workers at once from a sing
 - **Deterministic and resumable.** Results are cached, so an interrupted or edited workflow resumes without redoing finished work.
 - **Visible.** The `/stampede` pane shows each run, its phases, workers and messages, and wakes your session when a run finishes.
 
-Everything runs locally through a small hub on your machine. Release candidate `1.0.0-rc.3`; see [V1_STATUS.md](docs/V1_STATUS.md).
+Everything runs locally through a small hub on your machine. Release candidate `1.0.0-rc.4`; see [V1_STATUS.md](docs/V1_STATUS.md).
 
 ## Install
 
@@ -55,6 +55,6 @@ node dist/cli.js gc
 node dist/cli.js gc --worktrees
 ```
 
-Restart the hub after updating the plugin; it refuses while a run is active (`--force` interrupts) and keeps running in the foreground. `gc` removes expired run artifacts; `gc --worktrees` asks first and never deletes uncommitted work or branches.
+Restart the hub after updating the plugin; it refuses while a run is active (`--force` interrupts) and keeps running in the foreground unless given `--detach`. `gc` removes expired run artifacts; `gc --worktrees` asks first and never deletes uncommitted work or branches.
 
-State lives in `~/.stampede` (set `STAMPEDE_HOME` to move it), with settings in `config.json` there; a project's `.stampede/config.json` can only lower limits. Sandboxing limits what workers can do, but does not make untrusted workflow code or model output safe to run.
+State lives in `~/.stampede` (set `STAMPEDE_HOME` to move it), with settings in `config.json` there; a project's `.stampede/config.json` can only lower limits. The hub reads them when it starts, and `stampede doctor` shows the ones that stop long coding agents, with a warning for each: `claude.editShellAllow` (Claude edit agents get no shell without it), `allowFullAccess`, `limits.turnTimeoutMs` (4 hours by default) and `codex.approvalsReviewer` (Codex workers ignore your own Codex config, so its automatic reviewer can refuse risky commands even under full access; `"user"` turns that off). Sandboxing limits what workers can do, but does not make untrusted workflow code or model output safe to run.

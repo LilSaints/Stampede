@@ -69,6 +69,8 @@ if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || p
     }
   } finally { await client.close(); }
 }
+// A Claude worker's permission settings, as the hub wrote them, for a test to inspect.
+if (prompt === 'fixture:settings' && !codex) scenarioOutput = await readFile(argv[argv.indexOf('--settings') + 1], 'utf8');
 const output = process.env.STAMPEDE_FIXTURE_RESULT ?? scenarioOutput ?? prompt;
 if (codex) {
   if (prompt === 'fixture:external') {
@@ -85,5 +87,10 @@ if (codex) {
   const last = argv.indexOf('-o'); if (last >= 0) await writeFile(argv[last + 1], output);
 } else {
   if (prompt === 'fixture:external') emit({ type: 'assistant', message: { content: ['WebSearch', 'mcp__research__lookup', 'mcp__stampede__lookup'].map(name => ({ type: 'tool_use', name, input: { secret: 'fixture-not-for-journal' } })) } });
-  emit({ type: 'result', subtype: 'success', session_id: id, result: output, ...(argv.includes('--json-schema') ? { structured_output: JSON.parse(output) } : {}), usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.001 });
+  // An agent type whose tools leave out the structured-output tool answers in a fenced block, or not in
+  // JSON at all until the schema repair, resumed in its session, asks again.
+  const unstructured = { 'fixture:fenced-json': 'Review done.\n```json\n{"verdict":"fix"}\n```\nThanks.', 'fixture:prose': 'The verdict is fix.' }[prompt];
+  const repaired = resume >= 0 && prompt.startsWith('Your final message did not match the required JSON schema') ? '{"verdict":"fix"}' : undefined;
+  if (unstructured !== undefined) emit({ type: 'result', subtype: 'success', session_id: id, result: unstructured, usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.001 });
+  else emit({ type: 'result', subtype: 'success', session_id: id, result: repaired ?? output, ...(argv.includes('--json-schema') ? { structured_output: JSON.parse(repaired ?? output) } : {}), usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.001 });
 }

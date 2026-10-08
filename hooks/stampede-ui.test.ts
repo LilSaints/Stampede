@@ -17,14 +17,19 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as any);
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'AbovePrompt', props: { bodyColumns: 100 } as any });
   const drawn = JSON.stringify(await ui.drawn());
-  for (const text of ['review', '1 running · 1/2 done · 2m 0s', 'View']) expect(drawn.includes(text)).toBe(true);
+  for (const text of ['review', '1 running · 1/2 done · 2m 0s', 'View', 'Show panel']) expect(drawn.includes(text)).toBe(true);
   expect(drawn.includes('other')).toBe(false);
-  await ui.press({ key: 'open' });
-  expect(state.paneOpen).toBe(true);
-  // The band stays while the pane is open, its button now hiding the pane.
-  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('Hide')).toBe(true);
-  await ui.press({ key: 'open' });
+  // A row's View opens the pane on its run.
+  await ui.press({ key: 'view-0' });
+  expect(state.paneOpen).toBe(true); expect(state.openRuns?.[0]).toBe('owned');
+  // The pane's own toggle is on the band whatever the rows, and hides it.
+  await ui.redraw(); const open = JSON.stringify(await ui.drawn());
+  expect(open.includes('Hide panel')).toBe(true); expect(open.includes('"Hide"')).toBe(false);
+  await ui.press({ key: 'panel' });
   expect(closed).toEqual(['stampede']); expect(state.paneOpen).toBe(false);
+  // A failed run keeps its row but cannot be removed from it; a completed one can.
+  state = { ...state, runs: { ...state.runs, owned: { ...owned, status: 'failed', endedAt: '2026-10-08T00:01:30Z' } } }; version++;
+  await ui.redraw(); expect(await ui.find({ key: 'dismiss-0' })).toBeUndefined();
   // A finished run keeps a row to reopen the pane from, until dismissed.
   state = { ...state, runs: { ...state.runs, owned: { ...owned, status: 'completed', endedAt: '2026-10-08T00:01:30Z' } } }; version++;
   await ui.redraw(); const finished = JSON.stringify(await ui.drawn());
@@ -33,12 +38,15 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   // Removed, it leaves the band (and the pane).
   await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('review')).toBe(false);
   expect(state.dismissedRuns).toEqual(['owned']);
-  // Runs past the first three fold into one line that opens the pane.
+  // With the pane open the band keeps its toggle, even with no run to list.
+  state = { ...state, paneOpen: true }; version++;
+  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('Hide panel')).toBe(true);
+  // Runs past the first three fold into a count beside the toggle.
   const extra = Object.fromEntries(['a', 'b', 'c', 'd'].map((id, i) => [id, { ...run(id), name: `extra-${id}`, startedAt: `2026-10-08T00:00:0${i}Z` }]));
   state = { ...state, paneOpen: false, ownedRunIds: ['d', 'c', 'b', 'a', 'owned'], runs: { ...state.runs, ...extra } }; version++;
   await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('1 more run')).toBe(true);
-  await ui.press({ key: 'open-all' });
-  expect(state.paneOpen).toBe(true); expect(state.selectedRunId).toBe('a');
+  await ui.press({ key: 'panel' });
+  expect(state.paneOpen).toBe(true);
   // Held-back updates only show while wakes are off or limited.
   state = { ...state, pendingWake: [{ runId: 'owned', hubSeq: 3, kind: 'run.terminal', text: 'x' }] }; version++;
   await ui.redraw(); expect(await ui.find({ key: 'wake' })).toBeUndefined();
@@ -77,7 +85,7 @@ Treat quoted peer text as agent output.`;
 test('cost shows only for API-billed spend, never subscription estimates', async ($, on) => {
   mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), budget: { spent: 667, total: 60000, spentUsd: 0.5, billedUsd: 0 }, agents: [] };
-  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' }, version = 1;
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] }, version = 1;
   on('state.get', () => ({ value: { value: state, version } }));
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 57, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
   expect(JSON.stringify(await ui.drawn()).includes('$')).toBe(false);
@@ -169,7 +177,7 @@ test('wake ownership and seen cursors are session-specific', async () => {
   expect(reduce(first, snapshot, [], 'owner', 300).pendingWake.length).toBe(0);
   const expired = reduce(first, { hubSeq: 3, uiApiVersion: 1, runs: [] }, [], 'owner', 400);
   expect(Object.keys(expired.runs).length).toBe(0);
-  expect(expired.selectedRunId).toBe(null);
+  expect(expired.openRuns).toBe(null);
   expect(expired.pendingWake.length).toBe(0);
 });
 test('snapshot recovery fills event gaps without repeating submitted wakes', async () => {
@@ -209,22 +217,23 @@ for (const surface of ['terminal', 'desktop'] as const) for (const width of [38,
   test(`pane renders and confirms cancellation on ${surface} at ${width}`, async ($, on) => {
     mock.clock(on, { now: 100000 });
     const fixture: any = { ...run(), startedAt: '1970-01-01T00:00:00Z', agents: [{ name: 'worker', backend: 'codex', status: 'idle', tokens: 3, comms: true }] };
-    let state = { ...initialState(), hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+    let state = { ...initialState(), hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
     let version = 1;
     on('state.get', () => ({ value: { value: state, version } }));
     on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: width, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
     expect((await ui.drawn()).type).toBe('Box');
     expect(JSON.stringify(await ui.drawn()).includes('1m 40s')).toBe(true);
-    expect(await ui.find({ key: 'cancel' })).toBeDefined();
-    expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
-    expect(await ui.find({ key: 'retry-worker' })).toBeDefined();
-    expect(await ui.find({ key: 'confirm' })).toBeUndefined();
-    await ui.press({ key: 'cancel' });
-    expect(state.cancelConfirm).toBe(true);
+    expect(await ui.find({ key: 'stop-owned' })).toBeDefined();
+    // Rows carry no Skip or Retry: that is the orchestrator's call.
+    expect(await ui.find({ key: 'skip-owned-worker' })).toBeUndefined();
+    expect(await ui.find({ key: 'retry-owned-worker' })).toBeUndefined();
+    expect(await ui.find({ key: 'confirm-owned' })).toBeUndefined();
+    await ui.press({ key: 'stop-owned' });
+    expect(state.cancelConfirm).toBe('owned');
     // State is mocked here, so the test supplies the host's subscription redraw.
     await ui.redraw();
-    expect(await ui.find({ key: 'confirm' })).toBeDefined();
+    expect(await ui.find({ key: 'confirm-owned' })).toBeDefined();
     await ui.unmount();
   });
 }
@@ -236,11 +245,23 @@ test('a large run stays below the pane payload budget', async ($, on) => {
   large.messages = Array.from({ length: 20 }, (_, seq) => ({ seq, from: 'a'.repeat(40), to: 'b'.repeat(40), text: 'm'.repeat(16000) }));
   large.log = Array(10).fill('x'.repeat(1000));
   const others = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`other-${i}`, run(`other-${i}-` + 'x'.repeat(40), 'someone')]));
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: large, ...others }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: large, ...others }, ownedRunIds: ['owned'], openRuns: ['owned'] };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 160, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
   const size = JSON.stringify(await ui.drawn()).length;
   if (size >= 20000) throw new Error(`pane payload ${size} exceeds 20000`);
+  // Open cards share the detail budget, so opening more of four large runs never grows the pane.
+  const ids = ['owned', 'owned-2', 'owned-3', 'owned-4'];
+  for (const id of ids.slice(1)) (state.runs as any)[id] = { ...large, runId: id, name: id };
+  state.ownedRunIds = ids;
+  let previous = Infinity;
+  for (const n of [1, 2, 3, 4]) {
+    state.openRuns = ids.slice(0, n); await ui.redraw();
+    const drawn = JSON.stringify(await ui.drawn());
+    expect(drawn.split('"Phases"').length - 1).toBe(n);
+    if (n > 1 && drawn.length > previous) throw new Error(`pane payload grew from ${previous} to ${drawn.length} opening card ${n}`);
+    previous = drawn.length;
+  }
   await ui.unmount();
 });
 test('tool interception attaches session ownership and selects the new run', async ($, on) => {
@@ -252,7 +273,7 @@ test('tool interception attaches session ownership and selects the new run', asy
   on('tool.call', (_$, event) => { received = event; return { result: { content: [{ type: 'text', text: '{"runId":"new-run"}' }] } }; });
   await $.tool.call({ tool: 'mcp__plugin_stampede_stampede__workflow_run', script: 'fixture' } as any);
   expect(received.orchestratorSessionId).toBe('owner');
-  expect(state.selectedRunId).toBe('new-run');
+  expect(state.openRuns?.[0]).toBe('new-run');
   expect(state.ownedRunIds.includes('new-run')).toBe(true);
 });
 test('the polling loop waits for idle and submits a single owned wake', async ($, on) => {
@@ -291,7 +312,7 @@ test('the polling loop waits for idle and submits a single owned wake', async ($
 });
 for (const surface of ['terminal', 'desktop'] as const) test(`pane actions route to the hub on ${surface}`, async ($, on) => {
   const active: any = { ...run(), agents: [{ name: 'worker', backend: 'codex', status: 'running', tokens: 3, comms: true }] };
-  let state = { ...initialState(), stampedeHome: 'C:/fixture', hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: active }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  let state = { ...initialState(), stampedeHome: 'C:/fixture', hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: active }, ownedRunIds: ['owned'], openRuns: ['owned'] };
   let version = 0;
   const posts: { route: string; body: any }[] = [];
   mock.clock(on, { now: 100000 });
@@ -308,19 +329,14 @@ for (const surface of ['terminal', 'desktop'] as const) test(`pane actions route
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(value) } };
   });
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
-  await ui.press({ key: 'pause' });
+  await ui.press({ key: 'pause-owned' });
   expect(posts.at(-1)?.body.action).toBe('pause');
   expect(state.actionPending).toBe(false);
-  await ui.press({ key: 'retry-worker' });
-  expect(posts.at(-1)?.route).toBe('agent_control');
-  expect(posts.at(-1)?.body.action).toBe('retry');
-  await ui.press({ key: 'skip-worker' });
-  expect(posts.at(-1)?.body.action).toBe('skip');
   // The pane has no message, copy or log controls: Pause and Stop are the run's.
   for (const key of ['compose', 'copy', 'copy-id']) expect(await ui.find({ key })).toBeUndefined();
-  await ui.press({ key: 'cancel' });
+  await ui.press({ key: 'stop-owned' });
   await ui.redraw();
-  await ui.press({ key: 'confirm' });
+  await ui.press({ key: 'confirm-owned' });
   expect(posts.at(-1)?.body.action).toBe('cancel');
   await ui.unmount();
 });
@@ -343,7 +359,7 @@ test('agent cells follow the Workflow states and scale past the limit', async ()
 for (const surface of ['terminal', 'desktop'] as const) test(`workflow_run chat row is a live card that opens the pane on ${surface}`, async ($, on) => {
   mock.clock(on, { now: Date.parse('2026-10-08T00:01:05Z') });
   const live: any = { ...run(), name: 'review', startedAt: '2026-10-08T00:00:00Z', agents: [{ name: 'a', status: 'done' }, { name: 'b', status: 'running', lastActivity: '2026-10-08T00:01:00Z' }] };
-  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: live }, ownedRunIds: ['owned'], selectedRunId: null as string | null }, version = 1;
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: live }, ownedRunIds: ['owned'], openRuns: null as string[] | null }, version = 1;
   const opened: string[] = [];
   on('state.get', () => ({ value: { value: state, version } }));
   on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
@@ -354,7 +370,7 @@ for (const surface of ['terminal', 'desktop'] as const) test(`workflow_run chat 
   expect(drawn.includes('review')).toBe(true);
   expect(drawn.includes('1m 5s')).toBe(true);
   await click(ui, surface, 'open-owned', 'open-owned');
-  expect(state.selectedRunId).toBe('owned');
+  expect(state.openRuns).toEqual(['owned']);
   expect(opened).toEqual(['stampede']);
   state = { ...state, runs: { owned: { ...state.runs.owned, status: 'failed' } } }; version++; await ui.redraw();
   const done = JSON.stringify(await ui.drawn());
@@ -368,14 +384,14 @@ for (const surface of ['terminal', 'desktop'] as const) test(`workflow_run chat 
 test('phases open while the run is active and toggle closed', async ($, on) => {
   mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), phases: [{ title: 'Survey' }, { title: 'Summarize' }], agents: [{ name: 'worker', backend: 'claude', status: 'running', phase: 'Survey', tokens: 1 }] };
-  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' }, version = 1;
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] }, version = 1;
   on('state.get', () => ({ value: { value: state, version } }));
   on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
-  expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
+  expect(JSON.stringify(await ui.drawn()).includes('"worker"')).toBe(true);
   expect(JSON.stringify(await ui.drawn()).includes('No agents have started yet')).toBe(true);
-  await click(ui, 'desktop', 'phase-0', 'phase-row-0'); await ui.redraw();
-  expect(await ui.find({ key: 'skip-worker' })).toBeUndefined();
+  await click(ui, 'desktop', 'phase-owned-0', 'phase-row-owned-0'); await ui.redraw();
+  expect(JSON.stringify(await ui.drawn()).includes('"worker"')).toBe(false);
   expect(state.expandedPhases?.['owned:Survey']).toBe(false);
   await ui.unmount();
 });
@@ -386,7 +402,7 @@ test('expanded phases list each agent with its model and context size', async ($
   expect(contextFull({ context: { tokens: 210000, window: 258400 } })).toBe(true);
   expect(contextFull({ context: { tokens: 16789, window: 258400 } })).toBe(false);
   const fixture: any = { ...run(), agents: [{ name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', status: 'running', tokens: 1, context: { tokens: 46871, window: 1000000 } }, { name: 'critic', backend: 'codex', status: 'queued', tokens: 0 }] };
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
@@ -420,7 +436,7 @@ test('a desktop that attaches after session start still starts the UI once', asy
 for (const [surface, narrow, wide] of [['terminal', 51, 52], ['desktop', 57, 58]] as const) test(`the agent table drops Model, then stacks, as the ${surface} pane narrows`, async ($, on) => {
   mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), phases: [{ title: 'Explore' }], log: ['11 explorers inventory the desktop'], agents: [{ name: 'shell', backend: 'codex', model: 'gpt-fixture', status: 'running', phase: 'Explore', tokens: 1, context: { tokens: 20400 } }, { name: 'tools', backend: 'codex', status: 'queued', phase: 'Explore', tokens: 0 }] };
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   const drawn = async (bodyColumns: number) => {
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
@@ -436,33 +452,36 @@ for (const [surface, narrow, wide] of [['terminal', 51, 52], ['desktop', 57, 58]
   expect(stacked.includes('"Context"')).toBe(false);
   expect(stacked.includes('20.4k context')).toBe(true);
 });
-for (const surface of ['terminal', 'desktop'] as const) test(`an agent retrying after an error says so; only a failed one shows Error on ${surface}`, async ($, on) => {
+for (const surface of ['terminal', 'desktop'] as const) test(`agent names carry no glyph, say Retrying after an error, and turn red when failed on ${surface}`, async ($, on) => {
   mock.clock(on, { now: 100000 });
   const error = { kind: 'unknown', message: 'stream disconnected' };
   const fixture: any = { ...run(), phases: [{ title: 'Explore' }], agents: [{ name: 'retrying', backend: 'codex', status: 'running', phase: 'Explore', tokens: 0, error }, { name: 'recovered', backend: 'codex', status: 'done', phase: 'Explore', tokens: 0, error }] };
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned', expandedPhases: { 'owned:Explore': true } };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'], expandedPhases: { 'owned:Explore': true } };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
   let drawn = JSON.stringify(await ui.drawn());
   expect(drawn.includes('Retrying')).toBe(true);
-  expect(drawn.includes('Error')).toBe(false);
+  for (const glyph of ['✓', '✕', '· retrying', '· recovered']) expect(drawn.includes(glyph)).toBe(false);
+  expect(drawn.includes('"color":"error"')).toBe(false);
   fixture.agents[0].status = 'failed';
   await ui.redraw(); drawn = JSON.stringify(await ui.drawn());
   expect(drawn.includes('Retrying')).toBe(false);
-  expect(drawn.split('Error').length - 1).toBe(1);
+  expect(drawn.includes('Error')).toBe(false);
+  // The failed agent's name and its phase's title are red.
+  expect(drawn.split('"color":"error"').length - 1).toBe(2);
   await ui.unmount();
 });
 test('a running phase gets the agent rows before a finished one', async ($, on) => {
   mock.clock(on, { now: 100000 });
   const done = Array.from({ length: 4 }, (_, i) => ({ name: `survey-${i}`, backend: 'claude', status: 'done', phase: 'Survey', tokens: 1 }));
   const fixture: any = { ...run(), phases: [{ title: 'Survey' }, { title: 'Review' }], agents: [...done, { name: 'critic', backend: 'codex', status: 'running', phase: 'Review', tokens: 1 }] };
-  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned', expandedPhases: { 'owned:Survey': true } };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'], expandedPhases: { 'owned:Survey': true } };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 57, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
-  expect(await ui.find({ key: 'skip-critic' })).toBeDefined();
+  expect(JSON.stringify(await ui.drawn()).includes('"critic"')).toBe(true);
   expect(JSON.stringify(await ui.drawn()).includes('survey-3')).toBe(true);
   await ui.unmount();
-  expect(statusText({ ...state, runs: { owned: { ...fixture, budget: { spent: 1200 } } } })).toBe('● 1 running · 1.2k tokens');
+  expect(statusText({ ...state, runs: { owned: { ...fixture, budget: { spent: 1200 } } } })).toBe('● 1 running · 1.2k output tokens');
 });
 for (const surface of ['terminal', 'desktop'] as const) test(`a tool group holding a workflow run unfolds so its card stays on ${surface}`, async ($, on) => {
   let drawn: any;
@@ -493,29 +512,37 @@ test('/stampede toggles the pane', async ($, on) => {
 for (const surface of ['terminal', 'desktop'] as const) test(`the pane lists running and finished runs as cards that expand on ${surface}`, async ($, on) => {
   mock.clock(on, { now: Date.parse('2026-10-08T00:02:00Z') });
   const at = (id: string, status: string, start: string): any => ({ ...run(id), name: id, status, startedAt: start, ...(status === 'running' ? {} : { endedAt: '2026-10-08T00:01:00Z' }), agents: [{ name: `${id}-agent`, backend: 'claude', status: status === 'running' ? 'running' : 'done', tokens: 1 }] });
-  let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['live', 'done-1', 'done-2'], runs: { live: at('live', 'running', '2026-10-08T00:01:30Z'), 'done-1': at('done-1', 'completed', '2026-10-08T00:00:30Z'), 'done-2': at('done-2', 'failed', '2026-10-08T00:00:00Z') }, selectedRunId: 'live' as string | null }, version = 1;
+  let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['live', 'done-1', 'done-2'], runs: { live: at('live', 'running', '2026-10-08T00:01:30Z'), 'done-1': at('done-1', 'completed', '2026-10-08T00:00:30Z'), 'done-2': at('done-2', 'failed', '2026-10-08T00:00:00Z') }, openRuns: ['live'] as string[] | null }, version = 1;
   on('state.get', () => ({ value: { value: state, version } }));
   on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 80, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
   const drawn = JSON.stringify(await ui.drawn());
   for (const text of ['Running', 'Finished 2', 'Workflow', 'Completed', 'Failed', 'Phases']) expect(drawn.includes(text)).toBe(true);
-  expect(await ui.find({ key: 'cancel' })).toBeDefined();
+  expect(await ui.find({ key: 'stop-live' })).toBeDefined();
   // The Finished header collapses and expands its section.
   await click(ui, surface, 'finished', 'finished-row'); await ui.redraw();
   expect(state.finishedCollapsed).toBe(true); expect(JSON.stringify(await ui.drawn()).includes('done-1')).toBe(false);
   await click(ui, surface, 'finished', 'finished-row'); await ui.redraw();
   expect(state.finishedCollapsed).toBe(false);
-  // Expanding another card closes the first; pressing it again closes all.
+  // Cards expand and collapse one by one: opening another keeps the first open.
+  const phases = async () => JSON.stringify(await ui.drawn()).split('"Phases"').length - 1;
+  expect(await phases()).toBe(1);
   await click(ui, surface, 'toggle-done-1', 'head-done-1'); await ui.redraw();
-  expect(state.selectedRunId).toBe('done-1'); expect(await ui.find({ key: 'cancel' })).toBeUndefined();
+  expect(state.openRuns).toEqual(['done-1', 'live']); expect(await phases()).toBe(2);
+  await click(ui, surface, 'toggle-live', 'head-live'); await ui.redraw();
+  expect(state.openRuns).toEqual(['done-1']); expect(await phases()).toBe(1);
   await click(ui, surface, 'toggle-done-1', 'head-done-1'); await ui.redraw();
-  expect(state.selectedRunId).toBe(''); expect(JSON.stringify(await ui.drawn()).includes('Phases')).toBe(false);
-  // Finished runs are removed one by one, or all at once.
+  expect(state.openRuns).toEqual([]); expect(await phases()).toBe(0);
+  // Only completed runs are removed, one by one or all at once; a failed one stays listed.
+  state = { ...state, ownedRunIds: [...state.ownedRunIds, 'done-3'], runs: { ...state.runs, 'done-3': at('done-3', 'completed', '2026-10-08T00:00:10Z') } as typeof state.runs }; version++;
+  await ui.redraw();
+  expect(await ui.find({ key: 'remove-done-2' })).toBeUndefined();
   await ui.press({ key: 'remove-done-1' }); await ui.redraw();
-  expect(JSON.stringify(await ui.drawn()).includes('Finished 1')).toBe(true);
+  expect(JSON.stringify(await ui.drawn()).includes('Finished 2')).toBe(true);
   await click(ui, surface, 'clear-finished', 'clear-finished'); await ui.redraw();
   const cleared = JSON.stringify(await ui.drawn());
-  expect(cleared.includes('Finished')).toBe(false); expect(cleared.includes('live')).toBe(true);
+  expect(cleared.includes('Finished 1')).toBe(true); expect(cleared.includes('done-2')).toBe(true); expect(cleared.includes('done-3')).toBe(false);
+  expect(cleared.includes('live')).toBe(true); expect(await ui.find({ key: 'clear-finished' })).toBeUndefined();
   await ui.unmount();
 });
 test('an idle poll writes nothing, so an open pane is not redrawn', async ($, on) => {

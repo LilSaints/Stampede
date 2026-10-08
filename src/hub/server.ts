@@ -3,7 +3,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, readdir, writeFile, open, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { once } from 'node:events';
-import { VERSION, UI_API_VERSION, type Config } from './config.js';
+import { VERSION, UI_API_VERSION, settingsReport, type Config } from './config.js';
 import { Security, type Identity } from './security.js';
 import { Store, readJson, readJournal } from './store.js';
 import { RunManager } from './runs.js';
@@ -121,6 +121,14 @@ export async function startHub(options: { home: string; config: Config; cliEntry
         const text = JSON.stringify(agent.result), resultPath = path.join(store.runDir(run!.id), 'agents', agent.id, 'result.json');
         if (text.length > AGENT_RESULT_CHARS) await store.write(resultPath, agent.result);
         result = { ...result, ...(text.length > AGENT_RESULT_CHARS ? { result: truncate(text, AGENT_RESULT_CHARS), resultPath } : { result: agent.result }) };
+      } else {
+        // With no result stored, the latest attempt's final text, so an answer that failed validation can be salvaged.
+        const last = [...agent.turns].reverse().find(t => t.outcome?.text)?.outcome?.text;
+        if (last) {
+          const lastAnswerPath = path.join(store.runDir(run!.id), 'agents', agent.id, 'last-answer.txt');
+          if (last.length > AGENT_RESULT_CHARS) { await mkdir(path.dirname(lastAnswerPath), { recursive: true }); await writeFile(lastAnswerPath, last, { mode: 0o600 }); }
+          result = { ...result, ...(last.length > AGENT_RESULT_CHARS ? { lastAnswer: truncate(last, AGENT_RESULT_CHARS), lastAnswerPath } : { lastAnswer: last }) };
+        }
       }
     } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) }; }
     else if (name === 'workflow_messages') {
@@ -141,7 +149,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
         if (input.action === 'save') { if (!input.scriptPath) throw new Error('scriptPath required'); const source = await readFile(path.resolve(input.scriptPath), 'utf8'); parseWorkflow(source); await writeFile(file, source, { mode: 0o600 }); }
         result = { name: input.name, scriptPath: file, ...(input.action === 'show' ? { script: await readFile(file, 'utf8') } : {}) };
       }
-    } else if (name === 'stampede_doctor') result = { version: VERSION, node: process.version, backends: manager.backends, security: { aclVerified: security.aclVerified, ancestryActive: security.ancestryActive, warnings: security.warnings }, hub: { url: manager.hubUrl, activeRuns: manager.active.size } };
+    } else if (name === 'stampede_doctor') result = { version: VERSION, node: process.version, backends: manager.backends, security: { aclVerified: security.aclVerified, ancestryActive: security.ancestryActive, warnings: security.warnings }, hub: { url: manager.hubUrl, activeRuns: manager.active.size }, settings: settingsReport(config) };
     // One agent's result shows none of the run's events, so it leaves the seen cursor, and the wakes it holds back, alone.
     if (run && !ui && input.orchestratorSessionId && ['workflow_status', 'workflow_wait', 'workflow_result', 'workflow_messages'].includes(name) && !(name === 'workflow_result' && input.agent !== undefined)) { run.seenSeq[input.orchestratorSessionId] = observedSeq; await store.write(path.join(store.runDir(run.id), 'run.json'), run); }
     if (run && ui) await manager.event(run, 'orchestrator.action', { tool: name, action: input.action, agent: input.agent });

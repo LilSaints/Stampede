@@ -6,6 +6,22 @@ const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: true });
 const removed = new Set(['format', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'minItems', 'maxItems', 'uniqueItems', 'multipleOf', 'default', 'examples']);
 const supported = new Set(['type', 'properties', 'required', 'items', 'enum', 'const', 'anyOf', 'description', 'title', '$defs', '$ref', 'additionalProperties', '$schema']);
 function fail(location: string, reason: string): never { throw new Error(`schema not supported for backend codex: ${location}: ${reason}`); }
+/**
+ * A final answer's JSON: the whole text, else its last fenced block, else
+ * what lies from its first `{` to its last `}`. A Claude worker whose tools
+ * leave out the structured-output tool (an agent type's own list does) answers
+ * this way, and so may a model that wraps its JSON in prose.
+ */
+export function jsonAnswer(text: string | undefined): unknown {
+  if (!text) return undefined;
+  const fences = [...text.matchAll(/```(?:json)?[^\S\n]*\n([\s\S]*?)\n[^\S\n]*```/g)].map(match => match[1]!);
+  const start = text.indexOf('{'), end = text.lastIndexOf('}');
+  for (const candidate of [text.trim(), fences.at(-1), start >= 0 && end > start ? text.slice(start, end + 1) : undefined]) {
+    if (candidate === undefined) continue;
+    try { return JSON.parse(candidate); } catch {}
+  }
+  return undefined;
+}
 export function validateSchema(schema: Schema) {
   if (!schema || schema.type !== 'object' || !schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)) throw new Error('invalid schema: root must be an object with properties');
   if (schema.required && (!Array.isArray(schema.required) || schema.required.some((key: string) => !Object.hasOwn(schema.properties, key)))) throw new Error('invalid schema: required must be a subset of properties');

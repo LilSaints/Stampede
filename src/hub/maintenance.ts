@@ -4,7 +4,7 @@ import { readFile, readdir, rm, rmdir, lstat } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { parse } from 'smol-toml';
 import { atomicJson, readJson, Store } from './store.js';
-import { defaults, loadConfig, validateConfig, VERSION, type Config } from './config.js';
+import { defaults, loadConfig, settingsReport, validateConfig, VERSION, type Config } from './config.js';
 import { capture, probeBackends } from './capabilities.js';
 import { Security } from './security.js';
 import { runTerminal, type Run } from './model.js';
@@ -58,8 +58,11 @@ export async function doctor(home: string) {
       hub = { ok: response.ok, port: descriptor.port, ...await response.json() as object };
     } catch (error) { hub = { ok: false, error: (error as Error).message }; }
   }
+  // config.json is read when the hub starts: a running hub with other settings needs a restart to take them.
+  const settings = settingsReport(config), running = (hub as any)?.settings;
+  if (running && JSON.stringify({ ...running, warnings: [] }) !== JSON.stringify({ ...settings, warnings: [] })) settings.warnings.push('the running hub has other settings than config.json: restart it, once no run is active, to apply them');
   const plugins = backends.claude.binary ? await capture(backends.claude.binary, ['plugin', 'list', '--json']).catch(() => undefined) : undefined;
-  return { version: VERSION, node: { version: process.version, supported: Number(process.versions.node.split('.')[0]) >= 22 }, home, security: { aclVerified: security.aclVerified, warnings: security.warnings }, git: gitVersion.code === 0 ? gitVersion.stdout.trim() : gitVersion.stderr, backends, hub,
+  return { version: VERSION, settings, node: { version: process.version, supported: Number(process.versions.node.split('.')[0]) >= 22 }, home, security: { aclVerified: security.aclVerified, warnings: security.warnings }, git: gitVersion.code === 0 ? gitVersion.stdout.trim() : gitVersion.stderr, backends, hub,
     plugin: { installed: plugins?.code === 0 ? /"stampede@stampede"/.test(plugins.stdout) : null, connection: 'Use the Stampede MCP stampede_doctor tool to verify this session connects.' },
     windowsSandbox: { implementation: config.codex.windowsSandbox, ready: backends.codex.capabilities.workspaceWriteReady ?? null, error: backends.codex.capabilities.sandboxError } };
 }

@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.3';
+export const VERSION = '1.0.0-rc.4';
 export const UI_API_VERSION = 1;
 export function defaults() {
   const concurrency = Math.max(1, Math.min(16, os.cpus().length - 2, Math.floor(os.freemem() / (0.6 * 1024 ** 3))));
@@ -10,12 +10,12 @@ export function defaults() {
     hub: { idleShutdownMin: 30 },
     scheduler: { maxConcurrent: concurrency, perRun: Math.max(1, Math.min(16, os.cpus().length - 2)), claude: { maxConcurrent: 8 }, codex: { maxConcurrent: 6 }, nonCommsReserve: 1, admissionMaxMs: 600000 },
     claude: { binary: null as string | null, settingSources: 'user,project,local', isolateUserHooks: false, inheritMcpServers: false, persistNonComms: true, editShellAllow: [] as string[] },
-    codex: { entry: null as string | null, defaultModel: 'gpt-6-astra', defaultEffort: 'max', windowsSandbox: 'elevated', agentTypes: {} as Record<string, { developerInstructions: string; model?: string; effort?: string }>, disableUserHooks: false },
+    codex: { entry: null as string | null, defaultModel: 'gpt-6-astra', defaultEffort: 'max', windowsSandbox: 'elevated', agentTypes: {} as Record<string, { developerInstructions: string; model?: string; effort?: string }>, disableUserHooks: false, approvalsReviewer: null as string | null },
     security: { ancestryCheck: process.platform !== 'darwin' },
     cache: { maxFingerprintFiles: 20000, maxFingerprintBytes: 536870912, fingerprintTtlMs: 2000 },
     pricing: { codex: null as Record<string, { inputPerMTok: number; cachedPerMTok: number; outputPerMTok: number }> | null },
     delivery: { resumeDebounceMs: 1500, hookBatchMax: 10, claimLeaseMs: 10000 },
-    limits: { drainMs: 120000, turnTimeoutMs: 1800000, maxResumesPerAgent: 20, maxStopBlocks: 5, messagesPerAgent: 100, messagesPerRun: 2000, messageBytes: 16384, teamMaxMs: 7200000, teamMaxMessages: 500, schemaRepairs: 2, scriptCpuBlockMs: 10000, claudeTurnMaxUsd: null as number | null },
+    limits: { drainMs: 120000, turnTimeoutMs: 14400000, maxResumesPerAgent: 20, maxStopBlocks: 5, messagesPerAgent: 100, messagesPerRun: 2000, messageBytes: 16384, teamMaxMs: 14400000, teamMaxMessages: 500, schemaRepairs: 2, scriptCpuBlockMs: 10000, claudeTurnMaxUsd: null as number | null },
     store: { retentionDays: 30, keepSummaries: true, fsync: 'batch-50ms' },
     ui: { pollMs: 1000, idlePollMs: 10000, recentRunsMin: 60, wakeDebounceMs: 3000, maxWakesPerHour: 12 }
   };
@@ -68,12 +68,27 @@ export function validateConfig(config: Config) {
   for (const [key, value] of Object.entries(config.limits)) if (value !== null && (!Number.isFinite(value) || value < 0)) throw new Error(`invalid limits.${key}`);
   for (const key of ['turnTimeoutMs', 'scriptCpuBlockMs', 'drainMs'] as const) if (config.limits[key] <= 0) throw new Error(`limits.${key} must be positive`);
   for (const value of [config.hub.idleShutdownMin, config.ui.pollMs, config.ui.idlePollMs, config.delivery.claimLeaseMs]) if (value <= 0) throw new Error('timer intervals must be positive');
+  if (config.codex.approvalsReviewer !== null && (typeof config.codex.approvalsReviewer !== 'string' || !/^[a-z_]{1,40}$/.test(config.codex.approvalsReviewer))) throw new Error('invalid codex.approvalsReviewer');
   if (!Array.isArray(config.claude.editShellAllow)) throw new Error('invalid editShellAllow');
   for (const rule of config.claude.editShellAllow) {
     if (typeof rule !== 'string' || !/^(Bash|PowerShell)\(.+\)$/.test(rule)) throw new Error(`invalid shell permission rule: ${rule}`);
     if (!config.allowFullAccess && /^(?:PowerShell\(\*|Bash\((?:\*|(?:node|python\d*|pwsh|powershell|cmd|cat|type|npx|bash|sh)(?::|\s|\))))/i.test(rule)) throw new Error(`unsafe editShellAllow requires allowFullAccess: ${rule}`);
   }
   return config;
+}
+/**
+ * The settings that quietly decide what long coding agents can do, with a
+ * warning for each that will stop one: doctor shows them, the hub's own as it
+ * runs and the command's as config.json now has them.
+ */
+export function settingsReport(config: Config) {
+  const warnings: string[] = [];
+  if (!config.claude.editShellAllow.length) warnings.push('Claude agents with edit access get no shell (claude.editShellAllow is empty): they can edit files but not run builds or tests');
+  if (!config.allowFullAccess) warnings.push("access 'full' is refused (allowFullAccess is false)");
+  // Codex runs workers with --ignore-user-config, so its own reviewer decides on risky commands unless this says otherwise.
+  if (config.allowFullAccess && config.codex.approvalsReviewer === null) warnings.push('Codex agents, even with full access, have risky commands checked by Codex\'s automatic reviewer, which can refuse them ("blocked by policy"); set codex.approvalsReviewer to "user" to leave them to the access level alone');
+  if (config.limits.turnTimeoutMs < 3600000) warnings.push(`limits.turnTimeoutMs is ${Math.round(config.limits.turnTimeoutMs / 60000)} min: an agent turn running longer is killed, and no agent may ask for more`);
+  return { allowFullAccess: config.allowFullAccess, claude: { editShellAllow: config.claude.editShellAllow }, codex: { approvalsReviewer: config.codex.approvalsReviewer }, limits: { turnTimeoutMs: config.limits.turnTimeoutMs, teamMaxMs: config.limits.teamMaxMs }, warnings };
 }
 export async function loadConfig(home: string) {
   const base = defaults();

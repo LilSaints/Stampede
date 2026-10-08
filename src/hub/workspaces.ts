@@ -11,14 +11,22 @@ export function repoMutex(cwd: string) { const key = process.platform === 'win32
 export async function git(cwd: string, args: string[]) { const result = await capture('git', args, cwd); if (result.code !== 0) throw new Error(result.stderr.trim() || 'git failed'); return result.stdout.trim(); }
 export async function repoRoot(cwd: string) { try { return await git(cwd, ['rev-parse', '--show-toplevel']); } catch { return undefined; } }
 export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; commit?: string; kept?: boolean }
-export async function createWorkspace(cwd: string, runId: string, name: string): Promise<Workspace> {
+/** A git ref's commit in the repository holding `cwd`; a worktree problem, not a backend's, when it has none. */
+export async function resolveCommit(cwd: string, ref: string) {
+  const repo = await repoRoot(cwd);
+  if (!repo) throw Object.assign(new Error("isolation 'worktree' requires a git repository"), { kind: 'workspace' });
+  try { return await git(repo, ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`]); }
+  catch { throw Object.assign(new Error(`baseRef ${ref} names no commit in ${repo}`), { kind: 'workspace' }); }
+}
+export async function createWorkspace(cwd: string, runId: string, name: string, base?: string): Promise<Workspace> {
   const repo = await repoRoot(cwd); if (!repo) throw new Error("isolation 'worktree' requires a git repository");
   return repoMutex(repo).run(async () => {
     const short = runId.slice(-10).toLowerCase();
     if (!/^[a-z0-9-]{1,40}$/.test(name)) throw new Error('invalid agent name');
     const branch = `stampede/${short}/${name}`;
     const location = path.join(repo, '.stampede', 'worktrees', short, name);
-    const baseCommit = await git(repo, ['rev-parse', 'HEAD']);
+    // The checkout's HEAD, or the commit another agent's work ended at (baseRef).
+    const baseCommit = base ?? await git(repo, ['rev-parse', 'HEAD']);
     const gitDir = await git(repo, ['rev-parse', '--git-common-dir']);
     const exclude = path.resolve(repo, gitDir, 'info', 'exclude');
     await mkdir(path.dirname(exclude), { recursive: true });
@@ -40,7 +48,9 @@ export async function finishWorkspace(workspace: Workspace, name: string, snapsh
     }
     workspace.commit = await git(workspace.path, ['rev-parse', 'HEAD']);
     workspace.kept = Boolean(dirty) || workspace.commit !== workspace.baseCommit;
-    if (!workspace.kept) { await git(workspace.repo!, ['worktree', 'remove', workspace.path]); await git(workspace.repo!, ['branch', '-d', workspace.branch!]); }
+    // An unkept branch holds nothing past its base; a base from another agent's
+    // branch (baseRef) is not merged into the checkout, so -d would refuse it.
+    if (!workspace.kept) { await git(workspace.repo!, ['worktree', 'remove', workspace.path]); await git(workspace.repo!, ['branch', '-D', workspace.branch!]); }
     return workspace;
   });
 }

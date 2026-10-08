@@ -11,6 +11,10 @@ export interface AgentOpts {
   comms?: boolean | { canMessage?: string[] | '*'; autoDoneOnIdle?: boolean }; cache?: 'auto' | 'never'; cacheInputs?: string[]; appendSystemPrompt?: string;
   /** Wake the orchestrator when this agent is done; overrides the run's `notifyAgents`. Not part of the cache key. */
   notify?: boolean;
+  /** Other agents of the run whose worktrees this Claude agent may read (a reviewer of an integrator's branch); all others stay closed. */
+  readWorktrees?: string[];
+  /** Where this agent's worktree starts: a git ref, or another agent's finished worktree (`{ agent: name }`); default the checkout's HEAD. */
+  baseRef?: string | { agent: string };
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';
@@ -33,6 +37,8 @@ export interface Run {
   counters: { agentsStarted: number; agentsRunning: number; messages: number }; orchestratorSessionId?: string;
   /** Wake the orchestrator as each agent is done, unless its call says `notify: false`. */
   notifyAgents?: boolean;
+  /** The run's own name, given at workflow_run; `name` is it, or the script's meta.name without one. */
+  title?: string;
   agents: Agent[]; log: string[]; phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
   cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };

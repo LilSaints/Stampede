@@ -4,7 +4,8 @@ export interface StampedeUiState {
   hubSeq: number;
   runs: Record<string, any>;
   ownedRunIds: string[];
-  selectedRunId: string | null;
+  /** Expanded run cards, newest opened first; null until one is chosen, which opens the newest run. */
+  openRuns: string[] | null;
   paneOpen: boolean;
   busy: boolean;
   pendingWake: { runId: string; hubSeq: number; kind: string; text: string }[];
@@ -20,7 +21,8 @@ export interface StampedeUiState {
   pendingSince: number;
   lastTrigger: number;
   lastToast: number;
-  cancelConfirm: boolean;
+  /** The run whose Stop is asking to confirm. */
+  cancelConfirm: string | false;
   expandedPhases?: Record<string, boolean>;
   dismissedRuns?: string[];
   finishedCollapsed?: boolean;

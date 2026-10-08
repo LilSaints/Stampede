@@ -5,6 +5,8 @@ export function codexArgv(a: AgentLaunch, options: { resumeThreadId?: string; pl
   if ((options.platform ?? process.platform) === 'win32') argv.push('-c', `windows.sandbox=${quote(a.windowsSandbox)}`);
   argv.push('--skip-git-repo-check', '-C', a.cwd, '-s', { 'read-only': 'read-only', edit: 'workspace-write', full: 'danger-full-access' }[a.access], '-c', 'approval_policy="never"');
   if (a.model) argv.push('-m', a.model);
+  // The user's own setting is ignored with their config, so it is passed on when configured.
+  if (a.approvalsReviewer) argv.push('-c', `approvals_reviewer=${quote(a.approvalsReviewer)}`);
   if (a.effort) argv.push('-c', `model_reasoning_effort=${quote(a.effort)}`);
   argv.push('--disable', 'multi_agent', '--disable', 'multi_agent_v2');
   if (a.developerInstructionsFlag !== false) argv.push('-c', `developer_instructions=${quote(a.contract)}`);

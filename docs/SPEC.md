@@ -333,10 +333,14 @@ AgentOpts {
   role?: string;                           // free text shown to peers in list_agents
   comms?: boolean | { canMessage?: string[] | '*'; autoDoneOnIdle?: boolean };  // default false for agent()
   notify?: boolean;                        // wake the orchestrator when this agent is done (§20.6); default the run's notifyAgents; not in the cache key
+  readWorktrees?: string[];                // other agents of the run whose worktrees this Claude agent may read (a reviewer of an
+                                           // integrator's branch); every other agent's worktree stays closed to it; Codex limits writes, not reads
+  baseRef?: string | { agent: string };    // where its worktree starts: a git ref, or the commit another agent's finished worktree
+                                           // ended at; default the checkout's HEAD; needs worktree isolation; the resolved commit is in the cache key
   access?: 'read-only'|'edit'|'full';      // default: 'edit' if isolation==='worktree' else 'read-only'
                                            // edit/full without explicit isolation ⇒ isolation 'worktree' (§15.1)
   cwd?: string;                            // default: run cwd (the orchestrator's cwd at workflow_run)
-  timeoutMs?: number;                      // per turn; default limits.turnTimeoutMs (30 min)
+  timeoutMs?: number;                      // per turn; default limits.turnTimeoutMs (4 h), also its maximum
   maxResumes?: number;                     // default limits.maxResumesPerAgent (20)
   cache?: 'auto'|'never';                  // default 'auto' (§16.4)
   cacheInputs?: string[];                  // extra files/dirs (relative to cwd) fingerprinted into the cache key (§16.4)
@@ -393,7 +397,7 @@ TeamOpts { topology?: 'mesh'|'star'|{ [name: string]: string[] };  // default 'm
 ```ts
 Team {
   id: string; names: string[];
-  untilQuiet(o?: { idleMs?: number /*default 30000*/; maxMs?: number /*default limits.teamMaxMs = 2h*/;
+  untilQuiet(o?: { idleMs?: number /*default 30000*/; maxMs?: number /*default limits.teamMaxMs = 4h*/;
                    maxMessages?: number /*default limits.teamMaxMessages = 500*/ }):
     Promise<{ reason: 'quiet'|'all-done'|'max-ms'|'max-messages'|'deadlock'|'budget'|'admission-timeout';
               admissionFailed: string[] }>;            // members that failed with admission_timeout (§14.5)
@@ -414,6 +418,10 @@ Team {
 - `deadlock` is returned only when the deadlock condition (§10.7) holds and at least one member is `waiting`.
 
 **`send(to, text)`** (top-level, from `orchestrator`) and **`board(topic?)`** are also exposed at top level for non-team comms-enabled `agent()` calls.
+
+**`await workspace(name)`** (top-level) gives an agent's worktree as `{branch, baseCommit, commit, path, kept}` (`commit` and `kept` once it is done), or `null` for an agent without one, so a script can hand one agent's branch to the next (`baseRef: {agent}`, `readWorktrees`) without asking the worker for it.
+
+**Schema answers.** A Claude answer without structured output (an agent type whose `tools:` list leaves out Claude Code's structured-output tool) is read from its text: the whole text, else its last fenced block, else its outermost braces, then validated; the run log says so. An answer that still fails validation is repaired in the same thread or session, on both backends, up to `limits.schemaRepairs` times, before any retry from the start. A failed attempt's final text stays readable with `workflow_result` and `agent` (`lastAnswer`).
 
 **Mixing:** a comms-enabled `agent()` call (`comms: true`) joins the run roster under its name and can message/be messaged by any agent permitted by its `canMessage` (default `'*'` = all comms-enabled agents in the run + orchestrator). `comms.autoDoneOnIdle` defaults to `true` for `agent()` and `false` for team members.
 
@@ -544,7 +552,7 @@ Exposed by `stampede mcp --role orchestrator`. All outputs are compact JSON (the
 
 | Tool | Input | Output |
 |---|---|---|
-| `workflow_run` | `{script?: string, scriptPath?: string, name?: string, args?: any, cwd?: string, budgetTokens?: number, budgetUsd?: number, defaultBackend?: 'claude'\|'codex', notifyAgents?: boolean, orchestratorSessionId?: string}` (exactly one of script/scriptPath/name; `orchestratorSessionId` is injected by the mod, never written by the model — §20.5) | `{runId, status:'running', scriptPath}` returns in < 1 s. `cwd` defaults to the shim's cwd (= orchestrator project). `script` is persisted to `runs/<id>/script.js` and the path returned (parity with built-in iterate-by-path). |
+| `workflow_run` | `{script?: string, scriptPath?: string, name?: string, args?: any, cwd?: string, budgetTokens?: number, budgetUsd?: number, defaultBackend?: 'claude'\|'codex', notifyAgents?: boolean, title?: string /*1–80 chars; the run's name in place of meta.name, kept on resume*/, orchestratorSessionId?: string}` (exactly one of script/scriptPath/name; `orchestratorSessionId` is injected by the mod, never written by the model — §20.5) | `{runId, status:'running', scriptPath}` returns in < 1 s. `cwd` defaults to the shim's cwd (= orchestrator project). `script` is persisted to `runs/<id>/script.js` and the path returned (parity with built-in iterate-by-path). |
 | `workflow_status` | `{runId, verbose?: boolean}` | `{status, phase, phases:[{title, agents:{queued,running,waiting,idle,done,failed}}], agents?:[…] (verbose), log:[last 10], unreadForOrchestrator, latestMessages:[≤5], budget, startedAt, elapsedSec, error?}` |
 | `workflow_wait` | `{runId, timeoutSec?: number /*1–50, default 45*/, wakeOnMessage?: boolean /*default true*/}` | Same as `workflow_status` plus `{woke: 'terminal'\|'message'\|'timeout'}` |
 | `workflow_result` | `{runId, agent?: string}` | `{status, result, error?, resultPath}`; error `not_finished` if non-terminal. With `agent`, at any time, live run or not: `{agent, status, error?, result?}`, the agent's stored result if it has one; a result over 20 000 characters of JSON comes as a truncated preview plus `resultPath`, the whole value written to `runs/<id>/agents/<agentId>/result.json`. |
@@ -906,7 +914,7 @@ Runs older than `store.retentionDays` (default 30) and terminal are deleted by t
 | Agents per run | 1000 | `agent()` throws |
 | Concurrent per run | min(16, cpus−2) | queue |
 | Items per parallel/pipeline | 4096 | throws |
-| Turn timeout | 30 min | kill → `timeout` (retryable once) |
+| Turn timeout | 4 h | kill → `timeout` (retryable once) |
 | Resumes per agent | 20 | further messages stay pending; orchestrator notified once |
 | Stop-blocks per turn | 5 | stop allowed |
 | Messages per agent / run | 100 / 2000 | `budget_exhausted` |
@@ -1023,7 +1031,8 @@ interface StampedeUiState {
   hubSeq: number;                                  // events cursor (§11.2)
   runs: Record<string, RunSummary>;                // by runId
   ownedRunIds: string[];                           // runs started by THIS session (§20.5)
-  selectedRunId: string | null;
+  openRuns: string[] | null;                       // expanded run cards, any number, newest opened first;
+                                                   // null opens the newest owned run; they share one detail budget
   paneOpen: boolean;
   busy: boolean;                                   // a turn is running in this session
   pendingWake: WakeTrigger[];                      // not yet submitted
@@ -1084,22 +1093,23 @@ Decide what to do next; reply to agents with workflow_send.
 Stampede ● 2 runs · 7 running · 2 waiting · 1 msg for Claude · 182k tok   [Open]
 ⚠ codex: auth failed — run 'codex login'                                 [Dismiss]
 ```
-`[Open]` opens/focuses the pane (a person's action, so the pane seats at any width).
+`[Open]` opens/focuses the pane (a person's action, so the pane seats at any width). As implemented, the band lists a row per live or recently finished owned run (grid, name, progress, `[View]` opening the pane on that run's card, `[×]` for a completed one) and ends with the pane's own `[Show panel]`/`[Hide panel]` toggle, beside a count of runs without a row; that toggle is there whenever the band is drawn, and the band stays drawn while the pane is open. Every line's controls start in one right-hand column. Only a completed run can be removed, from the band, its pane card or the pane's clear-all; a failed or stopped run stays listed.
 
 **Pane** (`$.ui.open({ id: 'stampede', title: 'Stampede' })`; drawn by `ui.render` on `{ component: 'Pane', requestId: 'stampede' }`): opened by `/stampede`, the band's `[Open]`, or automatically on the first owned `workflow_run` of the session (an unasked open: seats only at ≥ 144 terminal columns; if `isPlaced` is false, a toast says `Stampede: /stampede to open the pane`). Layout, top to bottom:
 ```
 Runs: [1 review-changes ●] [2 auth-refactor ⏸] [3 other: lint-sweep ✓]
 review-changes  run_…7Q  ● running  12:04  182k / 500k tok   [Pause] [Stop]
 ▸ Find      ✓3 ●2 ○1
-    ● claude finder-1    running  14k  reading src/auth/session.ts     [Skip] [Retry]
-    ◐ codex  reviewer    waiting   8k  wait_for_message                [Skip] [Retry]
+    finder-1    opus-5-5     14k  2m 10s
+    reviewer    gpt-6.1-sol   8k  1m 40s
 ▸ Verify    ○4
 Messages (1 for Claude)
   #41 codex-reviewer → orchestrator: line 88 null check missing; impl disagrees…
   #40 impl → codex-reviewer: fixed in a3f2c1, please re-check
 ```
 - Run tabs: hotkeys `1`–`9`; owned runs first, then other runs (prefixed `other:`), terminal runs fade after `ui.recentRunsMin`.
-- Agent rows: max 30 shown per phase (`…and N more`, no silent truncation). Buttons per row only for non-terminal agents. `[Retry]`/`[Skip]` map to `agent_control`.
+- Agent rows: max 30 shown per phase (`…and N more`, no silent truncation). A row is the agent's name with no status glyph, grey once it is finished, red when it failed, with `Retrying` while it retries after an error. Rows carry no buttons: skipping or retrying an agent is the orchestrator's decision, through `agent_control`.
+- Run names: a run is named by `workflow_run`'s `title`, or the script's `meta.name` without one, so one script run once per batch names each run apart.
 - `[Pause]` and `[Stop]` sit on the run's own row, as the built-in Workflow view's Stop does. `[Pause]` toggles `[Resume]`; `[Stop]` asks for confirmation inline (`Stop this workflow? [Stop] [Keep running]`). The pane has no message form, log or copy controls: the person steers agents by asking Claude, which sends through `workflow_send` and so stays aware of what was said.
 - Width: layout uses `e.props.bodyColumns`; below 60 columns, agent rows drop the last-activity column; below 40, only counts are shown.
 - The whole tree is kept under 20 000 characters (well below the 100 000 limit) by the caps above.
@@ -1139,12 +1149,15 @@ Messages (1 for Claude)
   "cache": { "maxFingerprintFiles": 20000, "maxFingerprintBytes": 536870912, "fingerprintTtlMs": 2000 },
   "codex": { "entry": null, "defaultModel": "gpt-6-astra", "defaultEffort": "max",
              "windowsSandbox": "elevated",          // V-15; seeded by init from the user's [windows] sandbox
-             "agentTypes": {}, "disableUserHooks": false },
+             "agentTypes": {}, "disableUserHooks": false,
+             "approvalsReviewer": null },        // Codex's approvals_reviewer, passed as -c; workers run with --ignore-user-config, so
+                                                 // without it Codex's automatic reviewer can refuse risky commands ("blocked by policy")
+                                                 // even under full access; "user" leaves them to the access level
   "pricing": { "codex": null },      // {"<model>": {"inputPerMTok": n, "cachedPerMTok": n, "outputPerMTok": n}}
   "delivery": { "resumeDebounceMs": 1500, "hookBatchMax": 10, "claimLeaseMs": 10000 },
-  "limits": { "drainMs": 120000, "turnTimeoutMs": 1800000, "maxResumesPerAgent": 20, "maxStopBlocks": 5,
+  "limits": { "drainMs": 120000, "turnTimeoutMs": 14400000, "maxResumesPerAgent": 20, "maxStopBlocks": 5,
               "messagesPerAgent": 100, "messagesPerRun": 2000, "messageBytes": 16384,
-              "teamMaxMs": 7200000, "teamMaxMessages": 500, "schemaRepairs": 2, "scriptCpuBlockMs": 10000,
+              "teamMaxMs": 14400000, "teamMaxMessages": 500, "schemaRepairs": 2, "scriptCpuBlockMs": 10000,
               "claudeTurnMaxUsd": null },
   "store": { "retentionDays": 30, "keepSummaries": true, "fsync": "batch-50ms" },
   "ui": { "pollMs": 1000, "idlePollMs": 10000, "recentRunsMin": 60, "wakeDebounceMs": 3000, "maxWakesPerHour": 12 }

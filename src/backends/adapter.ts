@@ -11,6 +11,8 @@ export interface AgentLaunch {
   windowsSandbox: string; timeoutMs: number; stdoutPath: string; stderrPath: string;
   inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number; persistNonComms?: boolean;
   disableHooks?: boolean; extraEnv?: Record<string, string>; mcpEnv?: Record<string, string>;
+  /** Codex's approvals_reviewer ("user", "auto_review"); Codex's own default without one. */
+  approvalsReviewer?: string;
   codexHookCommand?: string; trustCodexHooks?: boolean; developerInstructionsFlag?: boolean;
 }
 export interface TurnOutcome { ok: boolean; sessionId?: string; text?: string; structured?: unknown; usage: Usage; error?: { kind: ErrorKind; message: string }; code: number | null; signal?: string | null }

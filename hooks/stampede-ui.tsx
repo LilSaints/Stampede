@@ -5,14 +5,17 @@ type Engine = EngineInterface;
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 const clean = (text: string, max = 400) => String(text).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
 export function initialState(): StampedeUiState {
-  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], selectedRunId: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
+  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], openRuns: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
 }
 export function reduce(state: StampedeUiState, snapshot: any, events: any[], session: string, now: number): StampedeUiState {
   const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], toastPending: [...state.toastPending ?? []], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
   for (const run of snapshot.runs ?? []) next.runs[run.runId] = run;
   next.ownedRunIds = newestFirst(Object.values(next.runs).filter(r => r.orchestratorSessionId === session)).map(r => r.runId);
-  // null picks the newest run of this session; '' keeps every card closed.
-  if (next.selectedRunId === null || next.selectedRunId !== '' && !next.runs[next.selectedRunId]) next.selectedRunId = next.ownedRunIds[0] ?? newestFirst(snapshot.runs ?? [])[0]?.runId ?? null;
+  // null opens the newest run of this session; an empty list keeps every card
+  // closed. A run that is gone closes, and once none is left open null applies.
+  const kept = next.openRuns?.filter(id => next.runs[id]);
+  if (kept && (kept.length || !next.openRuns!.length)) next.openRuns = kept;
+  else { const newest = next.ownedRunIds[0] ?? newestFirst(snapshot.runs ?? [])[0]?.runId; next.openRuns = newest ? [newest] : null; }
   next.wakeSeen = Object.fromEntries(Object.entries(state.wakeSeen ?? {}).filter(([id]) => next.runs[id]));
   const candidates = snapshot.reconcile ? [...(snapshot.runs ?? []).flatMap((r: any) => r.notifications ?? []), ...events] : events;
   for (const event of candidates) {
@@ -76,6 +79,10 @@ export function wakeFinished(text: string) {
 }
 /** How long a finished run keeps its row in the band, unless dismissed. */
 const RECENT_MS = 30 * 60000;
+/** The open cards with this run's added first. */
+const withRun = (open: string[] | null, id: string) => [id, ...(open ?? []).filter(x => x !== id)];
+/** A card click: open the run's card, or close it and any Stop it was asking to confirm. */
+const toggleRun = (s: StampedeUiState, id: string): StampedeUiState => s.openRuns?.includes(id) ? { ...s, openRuns: s.openRuns.filter(x => x !== id), cancelConfirm: s.cancelConfirm === id ? false : s.cancelConfirm } : { ...s, openRuns: withRun(s.openRuns, id) };
 export const newestFirst =(runs: any[]): any[] => [...runs].sort((a, b) => (Date.parse(b.startedAt ?? '') || 0) - (Date.parse(a.startedAt ?? '') || 0));
 export function wakePrompt(state: StampedeUiState) {
   // Done lines go last, so a burst of them never cuts a failure or message from the first eight.
@@ -100,7 +107,7 @@ export function statusText(state: StampedeUiState) {
   if (!active.length) return undefined;
   // The app labels the entry with the plugin's name already.
   const running = active.reduce((n, r) => n + r.agents.filter((a: any) => ['starting', 'running', 'resuming', 'waiting'].includes(a.status)).length, 0);
-  return `● ${running} running · ${tokens(active.reduce((n, r) => n + r.budget.spent, 0))} tokens`;
+  return `● ${running} running · ${tokens(active.reduce((n, r) => n + r.budget.spent, 0))} output tokens`;
 }
 const tokens = (value: number) => value >= 1000 ? `${Math.round(value / 100) / 10}k` : String(value);
 // The agent grid mirrors the desktop's built-in Workflow view: 6px squares
@@ -273,7 +280,7 @@ async function openPane($: Engine, focus = true) { const placed = await $.ui.ope
       await request($, `/v1/orch/${tool}`, input);
       const cancelled = tool === 'workflow_control' && input.action === 'cancel';
       lastPoll = 0;
-      await change($, s => ({ ...s, cancelConfirm: cancelled ? false : s.cancelConfirm }));
+      await change($, s => ({ ...s, cancelConfirm: cancelled && s.cancelConfirm === input.runId ? false : s.cancelConfirm }));
       await poll($);
     } catch (error) { $.ui.toast(`Stampede: ${clean(String(error), 160)}`); }
     finally { await change($, s => ({ ...s, actionPending: false })); }
@@ -324,7 +331,7 @@ function runCard($: Engine, elements: any, surface: string, run: any, now: numbe
         <Text wrap="truncate">{clean(run.name, 60)}</Text>
         <Text dimColor>{'Workflow · '}{run.status === 'running' ? '' : <Text {...(run.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{`${statusLabel(run.status)} · `}</Text>}<Text>{String(n)}</Text>{` agent${n === 1 ? '' : 's'} · ${runTime(run, now)}`}</Text>
       </Box>
-      <Button key={`open-${run.runId}`} plain onPress={() => { void change($, s => ({ ...s, selectedRunId: run.runId })).then(() => openPane($)); }}>›</Button>
+      <Button key={`open-${run.runId}`} plain onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, run.runId) })).then(() => openPane($)); }}>›</Button>
     </Box>
     {grid}
   </Box>;
@@ -388,7 +395,7 @@ export const register: Register = (on, options) => {
     if (['workflow_run', 'workflow_resume'].includes(tool)) {
       const value: any = (result as any).result;
       let data; try { data = typeof value === 'string' ? JSON.parse(value) : value?.content ? JSON.parse(value.content.find((c: any) => c.type === 'text')?.text ?? '{}') : value; } catch {}
-      if (data?.runId) { const held = await state($); await change($, s => ({ ...s, ownedRunIds: [...new Set([...s.ownedRunIds, data.runId])], selectedRunId: data.runId })); lastPoll = 0; if (!held.ownedRunIds.length) await openPane($, false); }
+      if (data?.runId) { const held = await state($); await change($, s => ({ ...s, ownedRunIds: [...new Set([...s.ownedRunIds, data.runId])], openRuns: withRun(s.openRuns, data.runId) })); lastPoll = 0; if (!held.ownedRunIds.length) await openPane($, false); }
     }
     return result;
   });
@@ -406,19 +413,22 @@ export const register: Register = (on, options) => {
     const toggle = (event.data as any)?.toggle;
     if (typeof toggle !== 'string') return next(event);
     const at = toggle.indexOf(':'), kind = toggle.slice(0, at), id = toggle.slice(at + 1);
-    if (kind === 'card') await change($, s => ({ ...s, selectedRunId: s.selectedRunId === id ? '' : id, cancelConfirm: false }));
+    if (kind === 'card') await change($, s => toggleRun(s, id));
     else if (kind === 'phase') await change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [id]: !(PHASE_OPEN.get(id) ?? false) } }));
     else if (kind === 'finished') await change($, s => ({ ...s, finishedCollapsed: !s.finishedCollapsed }));
-    else if (kind === 'clear') await change($, s => { const done = s.ownedRunIds.filter(runId => s.runs[runId] && terminal(s.runs[runId].status)); return { ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...done])].slice(-100), selectedRunId: done.includes(s.selectedRunId ?? '') ? '' : s.selectedRunId }; });
-    else if (kind === 'open') { await change($, s => ({ ...s, selectedRunId: id })); await openPane($); }
+    else if (kind === 'clear') await change($, s => { const done = s.ownedRunIds.filter(runId => s.runs[runId]?.status === 'completed'); return { ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...done])].slice(-100), openRuns: s.openRuns ? s.openRuns.filter(runId => !done.includes(runId)) : null }; });
+    else if (kind === 'open') { await change($, s => ({ ...s, openRuns: withRun(s.openRuns, id) })); await openPane($); }
     return {};
   });
   // The band above the prompt: a row per run of this session, live ones and
   // those finished in the last half hour until dismissed (grid, name,
-  // progress, View or Hide), so the pane can always be reopened. Below them,
-  // only the notices that need the person: a version or hub problem, a
+  // progress, View opening the pane on it), then the pane's own Show/Hide
+  // toggle, there whenever the band is, beside a count of runs without a row.
+  // Below them, only the notices that need the person: a version or hub problem, a
   // dismissable backend alert, and updates held back while wakes are off or
   // limited.
+  // The band's controls column, as wide as its longest control, "Hide panel".
+  const BAND_CONTROLS = 10;
   on('ui.render', { component: 'AbovePrompt' }, async ($, event, next) => {
     const held = await state($), now = await $.clock.now();
     const owned = held.ownedRunIds.map(id => held.runs[id]).filter(Boolean);
@@ -433,34 +443,41 @@ export const register: Register = (on, options) => {
     const held_back = held.pendingWake.filter(w => !CONTEXT_ONLY.includes(w.kind));
     const waiting = held_back.length > 0 && (!held.wakeEnabled || limited);
     const offline = !held.hub.ok && live.length > 0;
-    if (!rows.length && !earlier.length && !waiting && !offline && !held.hub.versionMismatch && (!alert || held.compactBand)) return next(event);
+    if (!rows.length && !earlier.length && !held.paneOpen && !waiting && !offline && !held.hub.versionMismatch && (!alert || held.compactBand)) return next(event);
     const elements = $.ui.resolve(event) as any; const { Box, Text, Button } = elements;
     return <Box flexDirection="column">
       {held.hub.versionMismatch && <Text color="warning">Stampede plugin and hub versions differ — restart the hub</Text>}
       {offline && <Text color="warning">Stampede hub offline — retrying</Text>}
       {rows.map((run, i) => {
         const c = counts(run.agents), done = terminal(run.status);
-        const shown = held.paneOpen && held.selectedRunId === run.runId;
         const progress = done ? `${statusLabel(run.status)} · ${c.total} agent${c.total === 1 ? '' : 's'}` : `${progressText(c)}${run.status === 'paused' ? ' · Paused' : ''}`;
         return <Box key={`band-${i}`} gap={2} alignItems="center">
           <Box width={event.surface === 'terminal' ? 23 : 12} flexShrink={0}>{gridElement(elements, event.surface, `band-grid-${i}`, [...cells(run.agents, now, 11), ...(done ? [] : ['ghost' as const])], 12, 23)}</Box>
           <Box flexGrow={1} flexShrink={1} minWidth={0}><Text wrap="truncate" dimColor={done}>{clean(run.name, 40)}</Text></Box>
           <Text dimColor>{`${progress} · ${runTime(run, now)}`}</Text>
-          <Button key={i ? `open-${i}` : 'open'} plain onPress={() => { void (shown ? change($, s => ({ ...s, paneOpen: false })).then(() => $.ui.close({ id: 'stampede' })) : change($, s => ({ ...s, selectedRunId: run.runId })).then(() => openPane($))); }}>{shown ? 'Hide' : 'View'}</Button>
-          {done && <Button key={`dismiss-${i}`} plain onPress={() => { void change($, s => ({ ...s, dismissedRuns: [...(s.dismissedRuns ?? []), run.runId].slice(-50) })); }}>×</Button>}
+          {/* View, and × for a completed run alone, start the controls column every line shares. */}
+          <Box width={BAND_CONTROLS} flexShrink={0} gap={2}>
+            <Button key={`view-${i}`} plain onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, run.runId) })).then(() => openPane($)); }}>View</Button>
+            {run.status === 'completed' && <Button key={`dismiss-${i}`} plain onPress={() => { void change($, s => ({ ...s, dismissedRuns: [...(s.dismissedRuns ?? []), run.runId].slice(-50) })); }}>×</Button>}
+          </Box>
         </Box>;
       })}
-      {earlier.length > 0 && <Box gap={2}><Box flexGrow={1}><Text dimColor>{`${earlier.length} ${rows.length ? 'more' : 'recent'} run${earlier.length === 1 ? '' : 's'}${earlierLive ? ` · ${earlierLive} running` : ''}`}</Text></Box><Button key="open-all" plain onPress={() => { void change($, s => ({ ...s, selectedRunId: earlier[0]!.runId })).then(() => openPane($)); }}>View all</Button></Box>}
+      {/* The panel's own toggle, on every band whatever its rows, beside the runs that have no row. */}
+      <Box gap={2}>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{earlier.length ? `${earlier.length} ${rows.length ? 'more' : 'recent'} run${earlier.length === 1 ? '' : 's'}${earlierLive ? ` · ${earlierLive} running` : ''}` : ''}</Text></Box>
+        <Box width={BAND_CONTROLS} flexShrink={0}><Button key="panel" plain onPress={() => { void (held.paneOpen ? change($, s => ({ ...s, paneOpen: false })).then(() => $.ui.close({ id: 'stampede' })) : openPane($)); }}>{held.paneOpen ? 'Hide panel' : 'Show panel'}</Button></Box>
+      </Box>
       {alert && !held.compactBand && <Box gap={2}><Box flexShrink={1} minWidth={0}><Text color="warning" wrap="truncate">{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text></Box><Button key="dismiss-alert" plain onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}
       {waiting && <Box gap={2}><Text dimColor>{`${held_back.length} Stampede update${held_back.length === 1 ? '' : 's'} for Claude · ${held.wakeEnabled ? 'wake limit reached' : 'wakes off'}`}</Text><Button key="wake" plain onPress={() => { void flush($, true); }}>Send to Claude</Button></Box>}
     </Box>;
   });
   // The pane lists this session's runs as the Background tasks panel lists
   // tasks: Running, then a collapsible Finished section, each run a small card
-  // (name, "Workflow · status · agents · time"). One card at a time expands,
-  // on click, into the Workflow detail: collapsible phases, each a grid over
+  // (name, "Workflow · status · agents · time"). Each card expands and
+  // collapses on a click, any number at once, into the Workflow detail: collapsible phases, each a grid over
   // an Agent / Model / Context / Time table, then messages and controls.
-  // Finished runs can be removed one by one or all at once.
+  // Completed runs can be removed one by one or all at once; failed and
+  // stopped ones stay listed.
   on('ui.render', { component: 'Pane', requestId: 'stampede' }, async ($, event, next) => {
     if (event.surface !== 'terminal' && event.surface !== 'desktop') return next(event);
     const held = await state($); const elements = $.ui.resolve(event) as any;
@@ -468,8 +485,8 @@ export const register: Register = (on, options) => {
     const desktop = event.surface === 'desktop';
     const owned = held.ownedRunIds.map(id => held.runs[id]).filter(Boolean);
     const live = owned.filter(r => !terminal(r.status)).slice(0, 8);
-    const finished = owned.filter(r => terminal(r.status) && !held.dismissedRuns?.includes(r.runId));
-    const run = held.selectedRunId ? owned.find(r => r.runId === held.selectedRunId) : undefined;
+    const finished = owned.filter(r => terminal(r.status) && !held.dismissedRuns?.includes(r.runId)), completed = finished.filter(r => r.status === 'completed');
+    const openIds = held.openRuns ?? [];
     // Columns drop as the table narrows, as the built-in table's do: Model,
     // then the stacked layout. The table sits inside the run card, and on the
     // desktop inside the Phases block and its phase too, whose rounded edges
@@ -477,77 +494,90 @@ export const register: Register = (on, options) => {
     const width = (event.props as any).bodyColumns ?? 100, table = width - (desktop ? 10 : 4), stacked = table < 32, showModel = table >= 48;
     const now = await $.clock.now();
     const dim = !held.hub.ok, busy = held.actionPending || held.hub.versionMismatch;
-    const active = run && !terminal(run.status);
-    // A phase opens by default while the run is live and it has unfinished
-    // agents, and those phases get the agent rows first. A small run lists up
-    // to 16 rows and a large one 4, so the pane stays within the surface's
-    // payload budget.
-    const large = (run?.agents.length ?? 0) > 60;
-    let gridsRemaining = 4;
-    const phases = run ? phaseGroups(run).slice(0, 8).map(phase => { const id = `${run.runId}:${phase.title}`, live = phase.agents.some(isLive); return { ...phase, id, open: held.expandedPhases?.[id] ?? (!!active && live), live }; }) : [];
-    const rows = phases.map(() => 0);
-    let left = large ? 4 : 16;
-    for (const i of phases.map((_, i) => i).sort((a, b) => Number(phases[b]!.live) - Number(phases[a]!.live))) {
-      if (!phases[i]!.open) continue;
-      rows[i] = Math.min(phases[i]!.agents.length, 30, left); left -= rows[i]!;
+    // A phase opens by default while its run is live and it has unfinished
+    // agents, and those phases get the agent rows first. The open cards share
+    // one budget, the card opened last first: 8 phases, 16 agent rows (4 while
+    // one of them is a large run), 4 grids and 6 messages, so the pane stays
+    // within the surface's payload budget however many are open.
+    let phasesLeft = 8, rowsLeft = owned.some(r => openIds.includes(r.runId) && r.agents.length > 60) ? 4 : 16, gridsLeft = 4, messagesLeft = 6;
+    const plans = new Map<string, { phases: any[]; rows: number[]; grids: boolean[]; messages: number; more: number }>();
+    for (const id of openIds) {
+      const run = held.runs[id];
+      if (!run || !held.ownedRunIds.includes(id)) continue;
+      const active = !terminal(run.status), groups = phaseGroups(run);
+      const phases = groups.slice(0, Math.min(8, phasesLeft)).map(phase => { const phaseId = `${id}:${phase.title}`, live = phase.agents.some(isLive); return { ...phase, id: phaseId, open: held.expandedPhases?.[phaseId] ?? (active && live), live }; });
+      phasesLeft -= phases.length;
+      const rows = phases.map(() => 0);
+      for (const i of phases.map((_, i) => i).sort((a, b) => Number(phases[b]!.live) - Number(phases[a]!.live))) {
+        if (!phases[i]!.open) continue;
+        rows[i] = Math.min(phases[i]!.agents.length, 30, rowsLeft); rowsLeft -= rows[i]!;
+      }
+      const grids = phases.map(phase => phase.agents.length > 0 && gridsLeft-- > 0);
+      const messages = Math.min((run.messages ?? []).length, 6, messagesLeft); messagesLeft -= messages;
+      plans.set(id, { phases, rows, grids, messages, more: groups.length - phases.length });
     }
-    const billed = run?.budget.billedUsd ? ` · $${run.budget.billedUsd.toFixed(2)}` : '';
     const col = (text: string, w: number, color?: string) => <Box width={w} flexShrink={0}><Text wrap="truncate" {...(color ? { color } : { dimColor: true })}>{text}</Text></Box>;
-    const remove = (ids: string[]) => change($, s => ({ ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...ids])].slice(-100), selectedRunId: ids.includes(s.selectedRunId ?? '') ? '' : s.selectedRunId }));
-    const detail = run && <Box flexDirection="column" marginTop={1}>
-      <Text dimColor>{`${tokens(run.budget.spent)}${run.budget.total == null ? '' : ` / ${tokens(run.budget.total)}`} tokens${billed}`}</Text>
-      {held.cancelConfirm && active && <Box gap={1}><Text color="warning">Stop this workflow?</Text><Button key="confirm" variant="primary" onPress={() => { void action($, 'workflow_control', { runId: run.runId, action: 'cancel' }); }}>Stop</Button><Button key="dismiss" onPress={() => { void change($, s => ({ ...s, cancelConfirm: false })); }}>Keep running</Button></Box>}
-      {held.actionPending && <Text dimColor>Updating…</Text>}
-      {run.error && <Box marginTop={1} paddingX={1} {...(desktop ? { backgroundColor: run.status === 'failed' ? '#d03b3b14' : '#8080800d' } : {})}><Text {...(run.status === 'failed' ? { color: 'error' } : { dimColor: true })} wrap="wrap">{clean(run.error.message ?? String(run.error), 400)}</Text></Box>}
-      <Box flexDirection="column" marginTop={1} {...(desktop ? NESTED : {})}>
-      <Box><Text bold>Phases</Text></Box>
-      {phases.map((phase, index) => {
-        const { agents, id, open } = phase, c = counts(agents), shown = rows[index]!;
-        PHASE_OPEN.set(id, open);
-        const states = cells(agents, now, 64);
-        const stalled = states.includes('stalled'), errored = states.includes('error');
-        const drawGrid = agents.length > 0 && gridsRemaining-- > 0;
-        // On the desktop a phase is one rounded block, its row, grid and table
-        // inside: tinted while open, lit under the pointer while closed.
-        return <Box key={`phase-${index}`} flexDirection="column" marginTop={index ? 1 : 0} {...(desktop ? { ...ROUNDED, ...(open ? { backgroundColor: CARD.backgroundColor } : { hover: { backgroundColor: CARD_HOVER } }) } : {})}>
-          {desktop
-            ? <Box><elements.Client key={`phase-row-${index}`} module="./row.tsx" flexGrow={1} props={{ id: `phase:${id}`, title: [{ text: clean(phase.title, 60), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total} done`, dim: true }] }} /></Box>
-            : <Box justifyContent="space-between" gap={1}>
-              <Box flexShrink={1}><Text wrap="truncate" {...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {})}>{clean(phase.title, 60)}</Text></Box>
-              <Box gap={1}><Text dimColor>{`${c.done}/${c.total} done`}</Text><Button key={`phase-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
+    const remove = (ids: string[]) => change($, s => ({ ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...ids])].slice(-100), openRuns: s.openRuns ? s.openRuns.filter(id => !ids.includes(id)) : null }));
+    // Every key in a card's detail names its run, so open cards never share one.
+    const detail = (run: any) => {
+      const id = run.runId, active = !terminal(run.status), { phases, rows, grids, messages, more } = plans.get(id)!;
+      const billed = run.budget.billedUsd ? ` · $${run.budget.billedUsd.toFixed(2)}` : '';
+      return <Box flexDirection="column" marginTop={1}>
+        <Text dimColor>{`${tokens(run.budget.spent)}${run.budget.total == null ? '' : ` / ${tokens(run.budget.total)}`} output tokens${billed}`}</Text>
+        {held.cancelConfirm === id && active && <Box gap={1}><Text color="warning">Stop this workflow?</Text><Button key={`confirm-${id}`} variant="primary" onPress={() => { void action($, 'workflow_control', { runId: id, action: 'cancel' }); }}>Stop</Button><Button key={`keep-${id}`} onPress={() => { void change($, s => ({ ...s, cancelConfirm: false })); }}>Keep running</Button></Box>}
+        {held.actionPending && <Text dimColor>Updating…</Text>}
+        {run.error && <Box marginTop={1} paddingX={1} {...(desktop ? { backgroundColor: run.status === 'failed' ? '#d03b3b14' : '#8080800d' } : {})}><Text {...(run.status === 'failed' ? { color: 'error' } : { dimColor: true })} wrap="wrap">{clean(run.error.message ?? String(run.error), 400)}</Text></Box>}
+        <Box flexDirection="column" marginTop={1} {...(desktop ? NESTED : {})}>
+        <Box><Text bold>Phases</Text></Box>
+        {phases.map((phase, index) => {
+          const { agents, open } = phase, c = counts(agents), shown = rows[index]!;
+          PHASE_OPEN.set(phase.id, open);
+          const states = cells(agents, now, 64);
+          const stalled = states.includes('stalled'), errored = states.includes('error');
+          const drawGrid = grids[index];
+          // On the desktop a phase is one rounded block, its row, grid and table
+          // inside: tinted while open, lit under the pointer while closed.
+          return <Box key={`phase-${id}-${index}`} flexDirection="column" marginTop={index ? 1 : 0} {...(desktop ? { ...ROUNDED, ...(open ? { backgroundColor: CARD.backgroundColor } : { hover: { backgroundColor: CARD_HOVER } }) } : {})}>
+            {desktop
+              ? <Box><elements.Client key={`phase-row-${id}-${index}`} module="./row.tsx" flexGrow={1} props={{ id: `phase:${phase.id}`, title: [{ text: clean(phase.title, 60), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total} done`, dim: true }] }} /></Box>
+              : <Box justifyContent="space-between" gap={1}>
+                <Box flexShrink={1}><Text wrap="truncate" {...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {})}>{clean(phase.title, 60)}</Text></Box>
+                <Box gap={1}><Text dimColor>{`${c.done}/${c.total} done`}</Text><Button key={`phase-${id}-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [phase.id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
+              </Box>}
+            {drawGrid ? gridElement(elements, event.surface, `grid-${id}-${index}`, states, 16, width - 2) : agents.length ? null : <Text dimColor>{active ? 'No agents have started yet' : 'No agents ran in this phase'}</Text>}
+            {shown > 0 && <Box flexDirection="column" marginTop={1}>
+              {!stacked && <Box gap={1}><Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>{showModel && col('Model', 10)}{col('Context', 7)}{col('Time', 7)}</Box>}
+              {agents.slice(0, shown).map((a: any) => {
+                // A finished agent's name is grey and a failed one's red; one retrying after an error says so.
+                // Skipping or retrying an agent is the orchestrator's call (agent_control), not a row's.
+                const failed = a.status === 'failed', finished = cellState(a, now) === 'done' || a.status === 'cancelled';
+                return <Box key={`${id}:${a.name}`} gap={1} flexDirection={stacked ? 'column' : 'row'}>
+                  <Box flexGrow={1} flexShrink={1} minWidth={0}><Text {...(failed ? { color: 'error' } : { dimColor: dim || finished })} wrap="truncate">{clean(a.label && a.label !== a.name ? a.label : a.name, 40)}{a.error && !failed && !finished ? <Text color="warning">{'  Retrying'}</Text> : ''}</Text></Box>
+                  {!stacked && showModel && col(modelName(a), 10)}
+                  {!stacked && col(a.context ? tokens(a.context.tokens) : '—', 7, contextFull(a) ? 'warning' : undefined)}
+                  {!stacked && col(agentTime(a, now) || '—', 7)}
+                  {stacked && <Text dimColor>{`  ${a.context ? `${tokens(a.context.tokens)} context · ` : ''}${agentTime(a, now) || '—'}`}</Text>}
+                </Box>;
+              })}
+              {agents.length > shown && <Text dimColor>{`…and ${agents.length - shown} more`}</Text>}
             </Box>}
-          {drawGrid ? gridElement(elements, event.surface, `grid-${index}`, states, 16, width - 2) : agents.length ? null : <Text dimColor>{active ? 'No agents have started yet' : 'No agents ran in this phase'}</Text>}
-          {shown > 0 && <Box flexDirection="column" marginTop={1}>
-            {!stacked && <Box gap={1}><Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>{showModel && col('Model', 10)}{col('Context', 7)}{col('Time', 7)}</Box>}
-            {agents.slice(0, shown).map((a: any) => {
-              const done = cellState(a, now) === 'done', live = isLive(a);
-              // Skip and Retry show on hover on the desktop, as row actions; the terminal keeps them in view.
-              const actions = live && <Box gap={1} marginLeft={1} {...(desktop ? { display: 'none', hover: { display: 'flex' } } : {})}><Button key={`skip-${a.name}`} plain dimColor={busy} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} plain dimColor={busy} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>;
-              return <Box key={a.name} gap={1} flexDirection={stacked ? 'column' : 'row'}>
-                <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor={dim || done} wrap="truncate">{`${done ? '✓' : a.status === 'failed' ? '✕' : '·'} ${clean(a.label && a.label !== a.name ? a.label : a.name, 40)}`}{!a.error || done ? '' : live ? <Text color="warning">{'  Retrying'}</Text> : <Text color="error">{'  Error'}</Text>}</Text>{actions}</Box>
-                {!stacked && showModel && col(modelName(a), 10)}
-                {!stacked && col(a.context ? tokens(a.context.tokens) : '—', 7, contextFull(a) ? 'warning' : undefined)}
-                {!stacked && col(agentTime(a, now) || '—', 7)}
-                {stacked && <Text dimColor>{`  ${a.context ? `${tokens(a.context.tokens)} context · ` : ''}${agentTime(a, now) || '—'}`}</Text>}
-              </Box>;
-            })}
-            {agents.length > shown && <Text dimColor>{`…and ${agents.length - shown} more`}</Text>}
-          </Box>}
-          {open && shown === 0 && agents.length > 0 && index === phases.findIndex((p, i) => p.open && rows[i] === 0 && p.agents.length > 0) && <Text dimColor>Agents in open phases are not all listed — collapse a phase to make room</Text>}
-        </Box>;
-      })}
-      {run.phases.length > 8 && <Text dimColor>{`…and ${run.phases.length - 8} more phases`}</Text>}
-      {(run.messages ?? []).length > 0 && <Box flexDirection="column" marginTop={1}><Box gap={2}><Text bold>Messages</Text><Text dimColor>{`${run.unreadForOrchestrator ?? 0} for Claude`}</Text></Box>
-        {(run.messages ?? []).slice(-6).map((m: any) => <Text key={`message-${m.seq}`} dimColor={dim} wrap="truncate"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
-      </Box>
-    </Box>;
+            {open && shown === 0 && agents.length > 0 && index === phases.findIndex((p, i) => p.open && rows[i] === 0 && p.agents.length > 0) && <Text dimColor>Agents in open phases are not all listed — collapse a phase to make room</Text>}
+          </Box>;
+        })}
+        {more > 0 && <Text dimColor>{`…and ${more} more phase${more === 1 ? '' : 's'}${phases.length < 8 ? ' — collapse a card to make room' : ''}`}</Text>}
+        {(run.messages ?? []).length > 0 && <Box flexDirection="column" marginTop={1}><Box gap={2}><Text bold>Messages</Text><Text dimColor>{`${run.unreadForOrchestrator ?? 0} for Claude`}</Text></Box>
+          {(messages ? (run.messages ?? []).slice(-messages) : []).map((m: any) => <Text key={`message-${id}-${m.seq}`} dimColor={dim} wrap="truncate"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
+        </Box>
+      </Box>;
+    };
     const card = (r: any, i: number) => {
-      const open = r === run, done = terminal(r.status), c = counts(r.agents);
+      const open = openIds.includes(r.runId), done = terminal(r.status), c = counts(r.agents);
+      // Only a completed run can be removed; a failed or stopped one stays listed.
       const control = done
-        ? <Button key={`remove-${r.runId}`} plain onPress={() => { void remove([r.runId]); }}>×</Button>
+        ? r.status === 'completed' && <Button key={`remove-${r.runId}`} plain onPress={() => { void remove([r.runId]); }}>×</Button>
         : <Box gap={1} flexShrink={0}>
-          <Button key={open ? 'pause' : `pause-${r.runId}`} dimColor={busy} onPress={() => { void action($, 'workflow_control', { runId: r.runId, action: r.status === 'paused' ? 'resume' : 'pause' }); }}>{r.status === 'paused' ? 'Resume' : 'Pause'}</Button>
-          <Button key={open ? 'cancel' : `stop-${r.runId}`} dimColor={busy} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId, cancelConfirm: true })); }}>Stop</Button>
+          <Button key={`pause-${r.runId}`} dimColor={busy} onPress={() => { void action($, 'workflow_control', { runId: r.runId, action: r.status === 'paused' ? 'resume' : 'pause' }); }}>{r.status === 'paused' ? 'Resume' : 'Pause'}</Button>
+          <Button key={`stop-${r.runId}`} dimColor={busy} onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, r.runId), cancelConfirm: r.runId })); }}>Stop</Button>
         </Box>;
       if (desktop) return <Box key={`card-${r.runId}`} flexDirection="column" {...CARD} {...(open ? {} : { hover: { backgroundColor: CARD_HOVER } })}>
         <Box gap={1} alignItems="flex-start">
@@ -555,16 +585,16 @@ export const register: Register = (on, options) => {
           {control}
         </Box>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
-        {open && detail}
+        {open && detail(r)}
       </Box>;
       return <Box key={`card-${r.runId}`} flexDirection="column" paddingX={1} paddingY={desktop ? 1 : 0} {...(desktop ? { backgroundColor: '#8080800d' } : { borderStyle: 'round', borderDimColor: true })}>
         <Box justifyContent="space-between" gap={1}>
-          <Box flexShrink={1}><Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => ({ ...s, selectedRunId: open ? '' : r.runId, cancelConfirm: false })); }}>{`${open ? '▾' : '▸'} ${clean(r.name, 50)}`}</Button></Box>
+          <Box flexShrink={1}><Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => toggleRun(s, r.runId)); }}>{`${open ? '▾' : '▸'} ${clean(r.name, 50)}`}</Button></Box>
           {control}
         </Box>
         <Text dimColor>{'Workflow · '}<Text {...(r.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{statusLabel(r.status)}</Text>{` · ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)} · ${runTime(r, now)}`}</Text>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
-        {open && detail}
+        {open && detail(r)}
       </Box>;
     };
     return <Box flexDirection="column" gap={1}>
@@ -590,16 +620,16 @@ export const register: Register = (on, options) => {
           {/* A bin icon button, as the Background tasks header's: the icon, a
               transparent click target painted over it, and a tooltip shown on
               hover. Plugins cannot put an icon in a Button. */}
-          <Box key="clear-finished-box" position="relative" {...ROUNDED} hover={{ backgroundColor: CARD_HOVER }}>
-            <elements.Svg key="clear-finished-icon" source={BIN} alt="Clear finished workflows" width={16} height={16} />
-            <Box position="absolute" top={0} left={0} right={0} bottom={0} alignItems="center" justifyContent="center" display="none" hover={{ display: 'flex' }}><elements.Svg key="clear-finished-icon-lit" source={BIN_LIT} alt="Clear finished workflows" width={16} height={16} /></Box>
+          {completed.length > 0 && <Box key="clear-finished-box" position="relative" {...ROUNDED} hover={{ backgroundColor: CARD_HOVER }}>
+            <elements.Svg key="clear-finished-icon" source={BIN} alt="Clear completed workflows" width={16} height={16} />
+            <Box position="absolute" top={0} left={0} right={0} bottom={0} alignItems="center" justifyContent="center" display="none" hover={{ display: 'flex' }}><elements.Svg key="clear-finished-icon-lit" source={BIN_LIT} alt="Clear completed workflows" width={16} height={16} /></Box>
             <Box position="absolute" top={0} left={0} right={0} bottom={0}><elements.Client key="clear-finished" module="./row.tsx" width="100%" height="100%" props={{ id: 'clear:', title: [{ text: ' ' }] }} /></Box>
-            <Box position="absolute" top={2} right={0} display="none" hover={{ display: 'flex' }} {...ROUNDED} backgroundColor="#262624"><Text wrap="truncate">Clear finished workflows</Text></Box>
-          </Box>
+            <Box position="absolute" top={2} right={0} display="none" hover={{ display: 'flex' }} {...ROUNDED} backgroundColor="#262624"><Text wrap="truncate">Clear completed workflows</Text></Box>
+          </Box>}
         </Box>
         : <Box justifyContent="space-between" gap={1}>
           <Button key="finished" plain dimColor onPress={() => { void change($, s => ({ ...s, finishedCollapsed: !s.finishedCollapsed })); }}>{`Finished ${finished.length} ${held.finishedCollapsed ? '▸' : '▾'}`}</Button>
-          <Button key="clear-finished" plain dimColor onPress={() => { void remove(finished.map(r => r.runId)); }}>Clear</Button>
+          {completed.length > 0 && <Button key="clear-finished" plain dimColor onPress={() => { void remove(completed.map(r => r.runId)); }}>Clear</Button>}
         </Box>)}
       {!held.finishedCollapsed && finished.slice(0, 8).map((r, i) => card(r, live.length + i))}
       {finished.length > 8 && !held.finishedCollapsed && <Text dimColor>{`…and ${finished.length - 8} more`}</Text>}
@@ -620,7 +650,7 @@ export const register: Register = (on, options) => {
     return <Box gap={1}>
       <Text dimColor>Ran workflow</Text><Box flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{clean(run?.name ?? props.input?.name ?? 'workflow', 60)}</Text></Box>
       {run?.status === 'failed' ? <Text color="error">Failed</Text> : run && run.status !== 'completed' ? <Text dimColor>Stopped</Text> : null}
-      {run && <Button key={`open-${runId}`} plain onPress={() => { void change($, s => ({ ...s, selectedRunId: runId })).then(() => openPane($)); }}>›</Button>}
+      {run && <Button key={`open-${runId}`} plain onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, runId) })).then(() => openPane($)); }}>›</Button>}
     </Box>;
   });
   // The desktop folds consecutive tool calls into one collapsed row, so the

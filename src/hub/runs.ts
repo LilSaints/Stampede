@@ -7,10 +7,10 @@ import { executeWorkflow } from '../runtime/hooks.js';
 import { parseWorkflow } from '../runtime/parse.js';
 import { type AgentLaunch, type TurnHandle, zeroUsage } from '../backends/adapter.js';
 import { launchTurn } from '../backends/procs.js';
-import { codexSchema, validateSchema } from '../backends/codexSchema.js';
+import { codexSchema, jsonAnswer, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
 import { externalTools } from '../backends/tool-usage.js';
-import { claudeContext, claudeWindow, codexContext } from '../backends/context.js';
+import { claudeContext, claudeReplies, claudeTranscriptSize, claudeWindow, codexContext } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
@@ -18,7 +18,7 @@ import { Scheduler, AdmissionError } from './scheduler.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
 import { type Agent, type AgentOpts, type Run, agentTerminal, runTerminal } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
-import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, repoRoot } from './workspaces.js';
+import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, repoRoot, resolveCommit } from './workspaces.js';
 
 const now = () => new Date().toISOString();
 const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -30,12 +30,12 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, 
 interface AgentContext {
   agent: Agent; opts: AgentOpts; prompt: string; abort: AbortController; token: string; tokenHash: string; done: Promise<unknown>; resolve: (value: unknown) => void;
   task?: Promise<void>; handle?: TurnHandle; release?: (id?: string) => void; tainted: boolean; resumeScheduled: boolean; launch?: AgentLaunch;
-  key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean;
+  key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean; base?: string;
   finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
   shared: { reads: string[]; writes: string[] };
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
-export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; limits?: Partial<Config['limits']> }
+export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
 export class RunManager extends EventEmitter {
@@ -102,13 +102,16 @@ export class RunManager extends EventEmitter {
     const config = lowerConfig(this.config, await readJson(path.join(cwd, '.stampede', 'config.json')) ?? {});
     const effective = input.limits ? lowerConfig(config, { limits: input.limits }) : config;
     for (const budget of [input.budgetTokens, input.budgetUsd]) if (budget !== undefined && (!Number.isFinite(budget) || budget < 0)) throw new Error('budget must be a non-negative finite number');
+    // A script run several times (one batch per run) names each run apart by its title.
+    const title = input.title?.trim();
+    if (input.title !== undefined && (typeof input.title !== 'string' || !title || title.length > 80)) throw new Error('title must be 1 to 80 characters');
     const backend = input.defaultBackend ?? config.defaultBackend;
     if (!['claude', 'codex'].includes(backend)) throw new Error('invalid backend');
     if (input.budgetUsd !== undefined && backend === 'codex' && !config.pricing.codex?.[config.codex.defaultModel]) throw new Error(`budgetUsd requires pricing for codex model ${config.codex.defaultModel}`);
     const id = `run_${ulid()}`; const directory = this.store.runDir(id);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const scriptPath = path.join(directory, 'script.js'); await writeFile(scriptPath, source, { mode: 0o600 });
-    const run: Run = { id, name: parsed.meta.name, cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
+    const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
     run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
@@ -124,7 +127,7 @@ export class RunManager extends EventEmitter {
   }
   async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string }) {
     const old = this.get(id); if (!runTerminal(old.status)) throw new Error('only terminal runs may be resumed');
-    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents }, id);
+    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title }, id);
   }
   async control(id: string, action: string) {
     const run = this.get(id), execution = this.active.get(id);
@@ -216,6 +219,8 @@ export class RunExecution {
     const phase = (title?: string) => group ? group + (title ? ' / ' + title : '') : title;
     if (method === 'agent') { const opts = params.opts ?? {}; const c = this.prepare(params.prompt, { ...opts, phase: phase(opts.phase) }); c.task = this.dispatch(c); void c.task.catch(e => this.fail(e)); return c.done; }
     if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
+    // An agent's worktree as the script needs it to continue that work: branch, commits and path.
+    if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name); return a?.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, baseCommit: a.workspace.baseCommit ?? null, commit: a.workspace.commit ?? null, path: a.workspace.path, kept: a.workspace.kept ?? null } : null; }
     if (method === 'log') { this.run.log.push(params.message); this.run.log = this.run.log.slice(-100); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
     if (method === 'board' || method === 'team.board') return this.bus.entries.filter(e => !params.topic || e.topic === params.topic);
@@ -261,6 +266,13 @@ export class RunExecution {
     if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
     if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
     if (opts.notify !== undefined && typeof opts.notify !== 'boolean') throw new Error('notify must be a boolean');
+    if (opts.readWorktrees !== undefined && (!Array.isArray(opts.readWorktrees) || opts.readWorktrees.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(name)))) throw new Error('readWorktrees must be a list of agent names');
+    if (opts.baseRef !== undefined) {
+      const ref: any = opts.baseRef;
+      if (typeof ref === 'string' ? !/^[^\s-]\S{0,199}$/.test(ref) : !ref || typeof ref !== 'object' || typeof ref.agent !== 'string') throw new Error('baseRef must be a git ref or { agent: name }');
+      if (!(opts.isolation === 'worktree' || opts.isolation === undefined && (opts.access === 'edit' || opts.access === 'full'))) throw new Error("baseRef needs isolation 'worktree', or edit or full access");
+      if (typeof ref === 'object' && !this.run.agents.find(a => a.name === ref.agent)?.workspace.commit) throw new Error(`baseRef agent ${ref.agent} has no finished worktree`);
+    }
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
     if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
@@ -291,6 +303,20 @@ export class RunExecution {
   // when it ends; a missing or unreadable rollout leaves the last value.
   // Reads can overlap (a throttled one still in flight when the turn ends), so
   // only the latest one started applies its result.
+  // Claude's transcript is read the same way, from where the last read of
+  // the turn stopped: the turn's replies so far are its live output.
+  private claudeRead = new Map<string, { offset: number; replies: Map<string, number>; at: number; reading: boolean }>();
+  private claudeOutput(a: Agent) {
+    const read = this.claudeRead.get(a.id);
+    if (!read || read.reading || !a.sessionId || Date.now() - read.at < 2000) return;
+    read.reading = true; read.at = Date.now();
+    void claudeReplies(a.sessionId, a.workspace.path, read.offset).then(found => {
+      if (!found || this.claudeRead.get(a.id) !== read || a.turns.at(-1)?.endedAt) return;
+      read.offset = found.next;
+      for (const [id, output] of found.replies) read.replies.set(id, output);
+      a.liveTokens = [...read.replies.values()].reduce((sum, n) => sum + n, 0);
+    }).catch(() => {}).finally(() => { read.reading = false; });
+  }
   private codexRead = new Map<string, { at: number; n: number }>();
   private codexContext(a: Agent, final: boolean) {
     const last = this.codexRead.get(a.id) ?? { at: 0, n: 0 };
@@ -307,6 +333,8 @@ export class RunExecution {
     }).catch(() => {});
   }
   private syncPeer(a: Agent) { this.peers.set(a.name, { name: a.name, backend: a.backend, comms: a.comms.enabled, canMessage: a.comms.canMessage, status: a.status, markedDone: a.markedDone, turn: a.turns.length }); }
+  /** A line of the run's log, which workflow_status shows the orchestrator, from the hub rather than the script. */
+  private async note(message: string) { this.run.log.push(message); this.run.log = this.run.log.slice(-100); await this.event('log', { message }); }
   async status(c: AgentContext, status: Agent['status']) {
     c.agent.status = status; c.agent.lastActivityAt = now(); this.syncPeer(c.agent);
     await this.manager.store.write(path.join(this.agentDir(c.agent), 'agent.json'), { ...c.agent, token_sha256: c.tokenHash, prompt_sha256: hash(c.prompt), shared: { tainted: c.tainted } });
@@ -324,7 +352,7 @@ export class RunExecution {
     const effort = c.opts.effort ?? agentType?.effort ?? (c.agent.backend === 'codex' ? this.config.codex.defaultEffort : undefined);
     // Whether the orchestrator hears of it changes nothing the agent does.
     const { notify: _notify, ...opts } = c.opts;
-    c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
+    c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType, base: c.base }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
     if (previousKey !== c.key) c.occ = this.cache.next(c.key);
     c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && c.agent.access !== 'full' && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
     if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
@@ -336,6 +364,8 @@ export class RunExecution {
       c.release = preReserved ?? await this.manager.scheduler.acquire([this.slot(c)], c.abort.signal);
       if (this.abort.signal.aborted || c.abort.signal.aborted) { await this.finish(c, 'cancelled'); return; }
       if (!this.budgetAvailable()) { c.agent.error = { kind: 'budget', message: 'budget exhausted' }; await this.finish(c, 'failed'); return; }
+      // An agent continuing another's work starts from the commit that work ended at, or the ref given; the key holds the commit.
+      if (c.opts.baseRef !== undefined) c.base ??= typeof c.opts.baseRef === 'object' ? this.run.agents.find(a => a.name === (c.opts.baseRef as { agent: string }).agent)!.workspace.commit! : await resolveCommit(c.agent.workspace.path, c.opts.baseRef);
       await this.identifyCall(c);
       if (c.cacheable && !c.agent.teamId) {
         const hit = await this.cache.lookup(c.key!, c.occ!);
@@ -345,13 +375,14 @@ export class RunExecution {
           this.run.cacheHits++; await this.finish(c, 'done'); return;
         }
       }
-      if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
+      if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name, c.base).catch(error => { throw Object.assign(error, { kind: 'workspace' }); }); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
       await this.configure(c);
       this.run.liveCalls++;
       await this.turn(c, c.prompt, false);
     } catch (error) {
       if (error instanceof AdmissionError) { c.agent.error = { kind: error.kind, message: error.message, blockedBy: error.blockedBy, waitedMs: error.waitedMs }; await this.event('team.admission_blocked', { agents: [c.agent.name], blockedBy: error.blockedBy, waitedMs: error.waitedMs }); }
-      else { c.agent.error = { kind: (error as any).kind ?? 'spawn', message: (error as Error).message }; if (!c.abort.signal.aborted) await this.backendUnavailable(c.agent.backend, c.agent.error); }
+      // Only a failure to start the backend makes it unavailable; a worktree problem fails this agent alone, and says so.
+      else { c.agent.error = { kind: (error as any).kind ?? 'spawn', message: (error as Error).message }; if (!c.abort.signal.aborted && ['spawn', 'auth'].includes(c.agent.error.kind)) await this.backendUnavailable(c.agent.backend, c.agent.error); else if (!c.abort.signal.aborted) await this.note(`${c.agent.name}: ${c.agent.error.message}`); }
       if (!agentTerminal(c.agent.status)) await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed');
     } finally {
       if (agentTerminal(c.agent.status)) { c.release?.(c.agent.id); c.release = undefined; }
@@ -364,15 +395,21 @@ export class RunExecution {
     const mcpPath = path.join(dir, 'mcp.json'), settingsPath = path.join(dir, 'settings.json');
     await this.manager.store.write(mcpPath, { mcpServers: a.comms.enabled ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token } } } : {} });
     const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${path.join(path.dirname(this.manager.cliEntry), 'hook.js')}" ${event} --backend claude`, timeout: 5 });
-    const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name)));
-    const deniedRoots = [this.manager.store.home, ...otherWorktrees];
-    await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: deniedRoots.flatMap(root => ['Read', 'Edit', 'Write'].map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, ...(a.comms.enabled ? { hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } } : {}) });
+    // Other agents' worktrees are closed to a Claude agent, but for reading
+    // the ones its call names in readWorktrees (a reviewer of an integrator's
+    // branch); Codex's sandbox limits writes, not reads.
+    const readable = new Set(c.opts.readWorktrees ?? []);
+    const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => ({ name: p.name, root: p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name) })));
+    const denied: [string, string[]][] = [[this.manager.store.home, ['Read', 'Edit', 'Write']], ...otherWorktrees.map(({ name, root }): [string, string[]] => [root, readable.has(name) ? ['Edit', 'Write'] : ['Read', 'Edit', 'Write']])];
+    await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, ...(a.comms.enabled ? { hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } } : {}) });
     const agentType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
     // The model asked for shows until the backend reports the one it resolved.
     a.model ??= c.launch.model;
+    // An edit agent on Claude with no shell rule can change files but not build or test them.
+    if (a.backend === 'claude' && a.access === 'edit' && !c.launch.editShellAllow?.length) await this.note(`${a.name}: edit access with no shell (claude.editShellAllow is empty), so it cannot run builds or tests`);
   }
   private async turn(c: AgentContext, initialPrompt: string, resume: boolean) {
     const a = c.agent;
@@ -390,7 +427,9 @@ export class RunExecution {
       await this.status(c, resume ? 'resuming' : 'starting');
       await this.event('agent.turn.start', { name: a.name, n, kind });
       this.run.counters.agentsRunning++;
-      const replies = new Map<string, number>();
+      // A resumed session's transcript already holds earlier turns, so this one counts from its end.
+      const resumed = resume || kind === 'schema-repair' ? a.sessionId : undefined;
+      if (a.backend === 'claude') this.claudeRead.set(a.id, { offset: resumed ? await claudeTranscriptSize(resumed, a.workspace.path) : 0, replies: new Map(), at: 0, reading: false });
       c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => {
         a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id;
         const tools = externalTools(event);
@@ -400,8 +439,8 @@ export class RunExecution {
           if (event.type === 'system' && event.subtype === 'init' && typeof event.apiKeySource === 'string') a.billing = event.apiKeySource === 'none' ? 'subscription' : 'api';
           const context = claudeContext(event), window = claudeWindow(event);
           if (context || window) a.context = { tokens: context?.tokens ?? a.context?.tokens ?? 0, ...((window ?? a.context?.window) ? { window: window ?? a.context?.window } : {}) };
-          // Each of the turn's requests reports its output, one message id per request.
-          if (event.type === 'assistant' && !event.parent_tool_use_id && typeof event.message?.id === 'string' && event.message.usage) { replies.set(event.message.id, event.message.usage.output_tokens ?? 0); a.liveTokens = [...replies.values()].reduce((sum, n) => sum + n, 0); }
+          // The stream's own usage counts output as each request starts; the transcript has its final count.
+          this.claudeOutput(a);
         } else if (event.type === 'item.completed' || event.type === 'turn.completed') this.codexContext(a, event.type === 'turn.completed');
       } });
       await this.status(c, 'running');
@@ -429,8 +468,12 @@ export class RunExecution {
         try {
           let result: unknown = outcome.text;
           if (c.opts.schema) {
-            result = a.backend === 'claude' ? outcome.structured : codexSchema(c.opts.schema).decode(JSON.parse(outcome.text ?? ''));
+            // A Claude answer with no structured output (its tools left the
+            // structured-output tool out) is read from its text, as Codex's is.
+            const parsed = a.backend === 'claude' && outcome.structured === undefined ? jsonAnswer(outcome.text) : undefined;
+            result = a.backend === 'claude' ? outcome.structured ?? parsed : codexSchema(c.opts.schema).decode(jsonAnswer(outcome.text));
             const validate = validateSchema(c.opts.schema); if (!validate(result)) throw new Error(JSON.stringify(validate.errors).slice(0, 1024));
+            if (parsed !== undefined) await this.note(`${a.name}: no structured output, so its answer's JSON was used; an agent type's tools may leave out the structured-output tool`);
           }
           if (result === undefined) throw new Error('missing final output');
           // A turn that stored a result supersedes an earlier attempt's error.
@@ -439,7 +482,10 @@ export class RunExecution {
           else { await this.status(c, 'idle'); this.scheduleResumes(); }
           return;
         } catch (error) {
-          if (a.backend === 'codex' && repairs++ < this.config.limits.schemaRepairs) { kind = 'schema-repair'; resume = true; prompt = `Your final message did not match the required JSON schema. Errors: ${(error as Error).message}. Reply with only the corrected JSON object.`; continue; }
+          // The repair resumes the thread or session that gave the answer, so its work is kept; a
+          // Claude session that was not kept (persistNonComms off) cannot be resumed.
+          const resumable = a.backend === 'codex' || a.comms.enabled || c.launch!.persistNonComms !== false;
+          if (resumable && a.sessionId && repairs++ < this.config.limits.schemaRepairs) { await this.note(`${a.name}: its answer did not match the schema; asking it to correct it`); kind = 'schema-repair'; resume = true; prompt = `Your final message did not match the required JSON schema. Errors: ${(error as Error).message}. Reply with only the corrected JSON object.`; continue; }
           outcome.error = { kind: 'schema', message: (error as Error).message };
         }
       }
@@ -458,6 +504,7 @@ export class RunExecution {
       if (!a.comms.enabled) { c.release?.(a.id); c.release = undefined; }
       if (limited) await sleep(Math.min(120000, [5000, 15000, 45000][attempts - 1] ?? 120000) + parseInt(hash(a.id).slice(0, 4), 16) % 1000, c.abort.signal);
       if (!a.comms.enabled) c.release = await this.manager.scheduler.acquire([this.slot(c)], c.abort.signal);
+      await this.note(`${a.name}: attempt ${attempts} failed (${error.kind}): ${error.message.slice(0, 160)}; retrying${resume ? '' : ' from the start'}`);
       kind = 'retry'; if (!resume) a.sessionId = undefined;
       prompt = initialPrompt;
     }

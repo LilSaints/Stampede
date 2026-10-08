@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { git } from '../../src/hub/workspaces.js';
 import path from 'node:path';
 import os from 'node:os';
 import { startHub } from '../../src/hub/server.js';
@@ -141,5 +142,58 @@ test('child workflows share live budgets and cancellation while keeping phase gr
     await hub.manager.control(waiting.runId, 'cancel'); await execution.task;
     assert.equal(execution.run.agents[0].status, 'cancelled');
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
+});
+test('a Claude answer without structured output is read from its text, or repaired in its own session', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-claude-schema-'));
+  const cwd = path.join(root, 'work'); await mkdir(cwd);
+  const config = defaults(); config.scheduler.maxConcurrent = 4; config.scheduler.perRun = 4;
+  const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-claude.mjs'), capabilities: {} };
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: fake, codex: { available: false, capabilities: {} } } });
+  try {
+    const schema = { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'], additionalProperties: false };
+    const started = await hub.manager.start({ cwd, defaultBackend: 'claude', args: { schema }, script: meta + 'return { fenced: await agent("fixture:fenced-json", { name: "fenced", schema: args.schema }), prose: await agent("fixture:prose", { name: "prose", schema: args.schema }) };' });
+    const execution = hub.manager.active.get(started.runId)!;
+    await execution.task;
+    const run = hub.manager.get(started.runId);
+    assert.equal(run.status, 'completed', JSON.stringify(run.error));
+    assert.deepEqual(run.result, { fenced: { verdict: 'fix' }, prose: { verdict: 'fix' } });
+    // The fenced answer is used as it stands; the prose one is repaired by resuming, never re-run.
+    assert.deepEqual(run.agents.map(a => a.turns.map(t => t.kind)), [['start'], ['start', 'schema-repair']]);
+    assert.ok(run.log.some(line => line.startsWith('fenced: no structured output')));
+    assert.ok(run.log.some(line => line.startsWith('prose: its answer did not match the schema')));
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
+});
+test('an agent continues another\'s worktree from its commit, a reviewer reads it, and a bad base fails that agent alone', { timeout: 60000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-base-'));
+  const cwd = path.join(root, 'work'); await mkdir(cwd);
+  await git(cwd, ['init']); await git(cwd, ['config', 'user.name', 'Stampede fixture']); await git(cwd, ['config', 'user.email', 'fixture@example.invalid']);
+  await writeFile(path.join(cwd, 'input.txt'), 'base'); await git(cwd, ['add', '.']); await git(cwd, ['commit', '-m', 'fixture']);
+  const config = defaults(); config.scheduler.maxConcurrent = 4; config.scheduler.perRun = 4;
+  const fake = (name: string) => ({ available: true, binary: process.execPath, entry: path.resolve(`test/fake-backends/fake-${name}.mjs`), version: '0.159.2', capabilities: {} });
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: fake('claude'), codex: fake('codex') } });
+  try {
+    const started = await hub.manager.start({ cwd, script: meta + `
+const writer = await agent("fixture:edit", { name: "writer", backend: "codex", access: "edit" });
+const settings = JSON.parse(await agent("fixture:settings", { name: "reader", backend: "claude", readWorktrees: ["writer"] }));
+await agent("next", { name: "next", backend: "codex", access: "edit", baseRef: { agent: "writer" } });
+let bad = null; try { await agent("x", { name: "bad", backend: "codex", baseRef: "-x" }); } catch (error) { bad = error.message; }
+const missing = await agent("y", { name: "missing", backend: "codex", access: "edit", baseRef: "no-such-ref" });
+return { writer: await workspace("writer"), next: await workspace("next"), reader: await workspace("reader"), deny: settings.permissions.deny, bad, missing, after: await agent("after", { name: "after", backend: "codex" }) };` });
+    await hub.manager.active.get(started.runId)!.task;
+    const run = hub.manager.get(started.runId);
+    assert.equal(run.status, 'completed', JSON.stringify(run.error));
+    const result = run.result as any, writerRoot = result.writer.path.replaceAll('\\', '/');
+    assert.match(result.writer.branch, /\/writer$/); assert.equal(result.writer.kept, true); assert.ok(result.writer.commit);
+    // The next agent starts where the writer finished, not at the checkout's HEAD.
+    assert.equal(result.next.baseCommit, result.writer.commit);
+    assert.equal(result.reader, null);
+    // The reviewer may read the named worktree, never write it.
+    assert.ok(!result.deny.includes(`Read(${writerRoot}/**)`));
+    assert.ok(result.deny.includes(`Edit(${writerRoot}/**)`) && result.deny.includes(`Write(${writerRoot}/**)`));
+    assert.match(result.bad, /baseRef must be a git ref/);
+    // A base that names no commit fails that agent alone: the backend stays available.
+    assert.equal(result.missing, null); assert.equal(result.after, 'after');
+    assert.ok(run.log.some(line => line.startsWith('missing: baseRef no-such-ref names no commit')));
   } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });

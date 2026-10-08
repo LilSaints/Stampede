@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
-import { codexSchema, validateSchema } from '../../src/backends/codexSchema.js';
+import { codexSchema, jsonAnswer, validateSchema } from '../../src/backends/codexSchema.js';
 import { Store, atomicJson, readJson, readJournal } from '../../src/hub/store.js';
 
 test('Codex encoding is lossless for optional properties, arrays and local refs', () => {
@@ -66,4 +66,11 @@ test('atomic snapshots retry antivirus-style rename contention without losing th
     assert.equal(attempts, 6); assert.deepEqual(await readJson(target), { version: 2 });
     assert.deepEqual(await fs.readdir(dir), ['snapshot.json']);
   } finally { t.mock.restoreAll(); syncBuiltinESMExports(); await rm(dir, { recursive: true, force: true }); }
+});
+test('an answer\'s JSON is the whole text, else its last fenced block, else its outermost braces', () => {
+  assert.deepEqual(jsonAnswer(' {"verdict":"ship"} '), { verdict: 'ship' });
+  assert.deepEqual(jsonAnswer('Review done.\n```json\n{"verdict":"draft"}\n```\nThen:\n```json\n{"verdict":"fix"}\n```\nThanks.'), { verdict: 'fix' });
+  assert.deepEqual(jsonAnswer('The answer is {"verdict":"fix","notes":["a {b}"]} as asked.'), { verdict: 'fix', notes: ['a {b}'] });
+  assert.equal(jsonAnswer('The verdict is fix.'), undefined);
+  assert.equal(jsonAnswer(undefined), undefined);
 });

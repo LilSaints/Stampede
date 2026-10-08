@@ -1,4 +1,4 @@
-import { open, readdir } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -57,6 +57,53 @@ export async function codexContext(threadId: string, home = process.env.CODEX_HO
     if (!model && entry?.type === 'turn_context' && typeof payload?.model === 'string') model = payload.model;
   }
   return context ? { ...context, ...(model ? { model } : {}), ...(spent === undefined ? {} : { spent }) } : undefined;
+}
+/**
+ * Claude's stream reports each request's usage as the request starts, so its
+ * output count there is a placeholder of a few tokens. The session transcript
+ * records each request's final usage: the whole lines from byte `from` on are
+ * read, and each main-thread reply's output tokens returned by message id.
+ */
+const transcripts = new Map<string, string>();
+const TRANSCRIPT_BYTES = 8 * 1024 * 1024;
+export async function claudeReplies(sessionId: string, cwd: string, from: number, home = claudeHome()): Promise<{ next: number; replies: Map<string, number> } | undefined> {
+  const file = await claudeTranscript(sessionId, cwd, home);
+  if (!file) return undefined;
+  const handle = await open(file, 'r');
+  let buffer: Buffer;
+  try {
+    const { size } = await handle.stat();
+    if (size <= from) return { next: from, replies: new Map() };
+    buffer = Buffer.alloc(Math.min(size - from, TRANSCRIPT_BYTES));
+    await handle.read(buffer, 0, buffer.length, from);
+  } finally { await handle.close(); }
+  // A line still being written is read next time; one longer than a whole read is passed over.
+  const end = buffer.lastIndexOf(10) + 1 || (buffer.length === TRANSCRIPT_BYTES ? buffer.length : 0);
+  const replies = new Map<string, number>();
+  for (const line of buffer.subarray(0, end).toString('utf8').split('\n')) {
+    let entry: any; try { entry = JSON.parse(line); } catch { continue; }
+    const output = entry?.message?.usage?.output_tokens;
+    if (entry?.type === 'assistant' && !entry.isSidechain && typeof entry.message.id === 'string' && Number.isFinite(output)) replies.set(entry.message.id, output);
+  }
+  return { next: from + end, replies };
+}
+/** Where a resumed session's transcript ends now, so its new turn counts from there. */
+export async function claudeTranscriptSize(sessionId: string, cwd: string, home = claudeHome()) {
+  const file = await claudeTranscript(sessionId, cwd, home);
+  return file ? (await stat(file).catch(() => undefined))?.size ?? 0 : 0;
+}
+const claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
+/** Claude names a project's folder after its path, each other character a dash; a long path's differs, so the rest are looked through. */
+async function claudeTranscript(sessionId: string, cwd: string, home: string) {
+  if (!/^[\w-]+$/.test(sessionId)) return undefined;
+  const known = transcripts.get(sessionId);
+  if (known) return known;
+  const projects = path.join(home, 'projects'), name = `${sessionId}.jsonl`;
+  for (const dir of [cwd.replace(/[^a-zA-Z0-9]/g, '-'), ...await readdir(projects).catch(() => [] as string[])]) {
+    const file = path.join(projects, dir, name);
+    if (await stat(file).then(() => true, () => false)) { transcripts.set(sessionId, file); return file; }
+  }
+  return undefined;
 }
 /** Rollouts live under sessions/YYYY/MM/DD; look through the newest week of days. */
 async function findRollout(root: string, threadId: string) {

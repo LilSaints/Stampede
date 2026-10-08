@@ -3,11 +3,11 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { readJson, Store } from './hub/store.js';
 import { stampedeHome, loadConfig, VERSION } from './hub/config.js';
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { role: { type: 'string' }, backend: { type: 'string' }, version: { type: 'boolean' }, help: { type: 'boolean' }, yes: { type: 'boolean' }, worktrees: { type: 'boolean' }, restart: { type: 'boolean' }, force: { type: 'boolean' } } });
+const { values, positionals } = parseArgs({ allowPositionals: true, options: { role: { type: 'string' }, backend: { type: 'string' }, version: { type: 'boolean' }, help: { type: 'boolean' }, yes: { type: 'boolean' }, worktrees: { type: 'boolean' }, restart: { type: 'boolean' }, force: { type: 'boolean' }, detach: { type: 'boolean' } } });
 const entry = path.resolve(process.argv[1]);
 try {
   if (values.version) process.stdout.write(VERSION + '\n');
-  else if (values.help || !positionals.length) process.stdout.write('Stampede: init [--yes] | doctor | gc [--worktrees] [--yes] | hub [--restart] [--force] | mcp --role orchestrator|agent | hook post-tool-use|stop --backend claude\n');
+  else if (values.help || !positionals.length) process.stdout.write('Stampede: init [--yes] | doctor | gc [--worktrees] [--yes] | hub [--restart] [--force] [--detach] | mcp --role orchestrator|agent | hook post-tool-use|stop --backend claude\n');
   else if (positionals[0] === 'hook') { const { hook } = await import('./hook/hook.js'); await hook(positionals[1], values.backend ?? 'claude'); }
   else if (positionals[0] === 'mcp') { if (!['agent', 'orchestrator'].includes(values.role ?? '')) throw new Error('--role agent|orchestrator required'); const { startShim } = await import('./mcp/shim.js'); await startShim(stampedeHome(), entry, values.role as 'agent' | 'orchestrator'); }
   else if (positionals[0] === 'hub') {
@@ -29,6 +29,13 @@ try {
           }
         }
       }
+    }
+    if (values.detach) {
+      // As a shim's autostart does: the hub in a process of its own, this command returning once it answers.
+      const { HubClient } = await import('./mcp/client.js');
+      await new HubClient(home, entry, 'orchestrator').connect(true);
+      process.stdout.write(`Stampede ${VERSION} hub running\n`);
+      process.exit(0);
     }
     const hub = await startHub({ home, config: await loadConfig(home), cliEntry: entry }).catch(async error => {
       if (error.message !== 'hub already running') throw error;

@@ -42,8 +42,10 @@ export class HubClient {
       if (retry && this.role === 'orchestrator' && !(error as any).httpStatus) {
         await this.discover();
         // A lost POST response does not establish that the mutation failed.
-        // Rediscover for the next call, but never duplicate an unknown outcome.
-        if (input === undefined) return this.request(route, input, false);
+        // Rediscover for the next call, but never duplicate an unknown outcome:
+        // only a refused connection (a hub restarted on another port) proves
+        // the request never arrived, so only then, or for a read, send it again.
+        if (input === undefined || (error as any)?.cause?.code === 'ECONNREFUSED') return this.request(route, input, false);
       }
       throw error;
     }

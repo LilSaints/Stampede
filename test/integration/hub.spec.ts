@@ -9,6 +9,7 @@ import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
 import { capture, type BackendInfo } from '../../src/hub/capabilities.js';
 import { atomicJson, readJson, readJournal } from '../../src/hub/store.js';
+import { HubClient } from '../../src/mcp/client.js';
 const meta = 'export const meta = { name: "fixture", description: "integration" };\n';
 test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 90000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-hub-'));
@@ -124,6 +125,13 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     assert.equal(hub.manager.get(replay.runId).cacheHits, 3);
     assert.equal(hub.manager.get(replay.runId).notifyAgents, true);
     assert.deepEqual(done(replay.runId), []);
+    // A title names the run in place of meta.name, and a resume keeps it.
+    const titled = await call('workflow_run', { cwd, script: meta + 'return 1;', title: '  Batch 2: history, editors  ' });
+    await waitRun({ runId: titled.runId, timeoutSec: 5 });
+    assert.equal(hub.manager.get(titled.runId).name, 'Batch 2: history, editors');
+    const retitled = await call('workflow_resume', { runId: titled.runId });
+    assert.equal(hub.manager.get(retitled.runId).name, 'Batch 2: history, editors');
+    await assert.rejects(hub.manager.start({ cwd, script: meta + 'return 1;', title: '   ' }), /title must be 1 to 80 characters/);
     // An agent that fails its last attempt is a notification, so the mod wakes the orchestrator mid-run.
     const lost = await call('workflow_run', { cwd, script: meta + 'return await agent("crash", { name: "lost" });', orchestratorSessionId: 'owner' });
     await waitRun({ runId: lost.runId, timeoutSec: 5 });
@@ -204,4 +212,20 @@ test('terminal team observation waits for durable idle release and reservation c
     assert.equal(execution.run.status, 'completed');
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
   } finally { release(); await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
+});
+test('an orchestrator shim reaches a hub restarted on another port without failing a call', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-restart-'));
+  const home = path.join(root, 'state');
+  const backends = { claude: { available: false, capabilities: {} }, codex: { available: false, capabilities: {} } } as any;
+  let hub = await startHub({ home, config: defaults(), cliEntry: path.resolve('dist/cli.js'), backends });
+  try {
+    const client = new HubClient(home, path.resolve('dist/cli.js'), 'orchestrator');
+    await client.connect(false);
+    const before = hub.port;
+    await hub.close();
+    hub = await startHub({ home, config: defaults(), cliEntry: path.resolve('dist/cli.js'), backends });
+    assert.notEqual(hub.port, before);
+    // The old port refuses the connection, so the POST never arrived: it is sent again to the new hub.
+    assert.ok(Array.isArray((await client.tool('workflow_list', {})).runs));
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });

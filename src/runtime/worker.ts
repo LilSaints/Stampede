@@ -54,6 +54,7 @@ async function pipeline(items, ...stages) {
 const workflow = (ref, args) => rpc('workflow', { ref, args });
 const send = (to, text) => rpc('send', { to, text });
 const board = topic => rpc('board', { topic });
+const workspace = name => rpc('workspace', { name: String(name) });
 async function spawnTeam(members, opts = {}) {
   const team = await rpc('spawnTeam', { members, opts: { phase: currentPhase, ...opts } });
   return Object.freeze({ ...team,
