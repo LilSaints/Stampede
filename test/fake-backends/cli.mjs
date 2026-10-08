@@ -13,7 +13,7 @@ if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 auth
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
 let scenarioOutput;
-if (prompt.startsWith('fixture:team') || prompt === 'fixture:burst' || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
+if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
   const server = codex
@@ -32,14 +32,16 @@ if (prompt.startsWith('fixture:team') || prompt === 'fixture:burst' || prompt ==
   try {
     if (prompt === 'fixture:read-board') await tool('read_board', {});
     else if (prompt === 'fixture:wait') await tool('wait_for_message', { timeoutSec: 45 });
-    else if (prompt === 'fixture:burst') {
+    else if (prompt.startsWith('fixture:burst')) {
       const identity = await tool('whoami', {});
-      for (let i = 0; i < 50; i++) await tool('send_message', { to: '*', text: `${identity.name}:${i}` });
+      let randomState = ((Number(prompt.split(':')[2]) || 1) ^ identity.name.charCodeAt(identity.name.length - 1)) >>> 0;
+      const jitter = async () => { randomState = (Math.imul(randomState, 1664525) + 1013904223) >>> 0; await new Promise(resolve => setTimeout(resolve, randomState % 5)); };
+      for (let i = 0; i < 50; i++) { await jitter(); await tool('send_message', { to: '*', text: `${identity.name}:${i}` }); }
       const received = [];
       while (received.length < 150) {
         const batch = await tool('read_messages', { max: 50 });
         received.push(...batch.messages);
-        if (!batch.messages.length) await new Promise(resolve => setTimeout(resolve, 5));
+        await jitter();
       }
       scenarioOutput = JSON.stringify({ received: received.length, ordered: received.every((message, i) => i === 0 || message.seq > received[i - 1].seq), unique: new Set(received.map(m => m.seq)).size });
       await tool('mark_done', {});

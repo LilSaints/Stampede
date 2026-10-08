@@ -45,6 +45,7 @@ export class RunManager extends EventEmitter {
   processStarted?: (pid: number, agent: Agent) => Promise<void>;
   recoverAgent?: (agent: Agent) => Promise<void>;
   private eventMutex = new Mutex();
+  private closing = false;
   constructor(readonly store: Store, readonly config: Config, readonly backends: Record<'claude' | 'codex', BackendInfo>, readonly cliEntry: string) {
     super(); const s = config.scheduler;
     this.scheduler = new Scheduler({ global: s.maxConcurrent, perRun: s.perRun, claude: s.claude.maxConcurrent, codex: backends.codex.capabilities.concurrentHomeSafe === false ? 1 : s.codex.maxConcurrent, reserve: s.nonCommsReserve, admissionMaxMs: s.admissionMaxMs });
@@ -92,6 +93,7 @@ export class RunManager extends EventEmitter {
     throw new Error('saved workflow not found');
   }
   async start(input: RunInput, resumeOf?: string) {
+    if (this.closing) throw new Error('hub is shutting down');
     const cwd = path.resolve(input.cwd ?? process.cwd());
     const source = await this.source(input, cwd); const parsed = parseWorkflow(source);
     const config = lowerConfig(this.config, await readJson(path.join(cwd, '.stampede', 'config.json')) ?? {});
@@ -110,6 +112,7 @@ export class RunManager extends EventEmitter {
     const limits = effective.scheduler;
     this.scheduler.configureRun(id, { global: limits.maxConcurrent, perRun: limits.perRun, claude: limits.claude.maxConcurrent, codex: limits.codex.maxConcurrent, reserve: limits.nonCommsReserve, admissionMaxMs: limits.admissionMaxMs });
     if (resumeOf) await execution.cache.load(this.store.runDir(resumeOf));
+    if (this.closing) { this.scheduler.forgetRun(id); throw new Error('hub is shutting down'); }
     this.runs.set(id, run); this.active.set(id, execution);
     await this.event(run, 'run.status', { status: run.status });
     execution.task = execution.execute(source).finally(() => { this.active.delete(id); this.scheduler.forgetRun(id); });
@@ -129,11 +132,13 @@ export class RunManager extends EventEmitter {
     return { status: run.status };
   }
   async shutdown() {
+    this.closing = true;
     const executions = [...this.active.values()];
     await Promise.all(executions.map(e => e.cancel('interrupted')));
     await Promise.allSettled(executions.map(e => e.task));
-    await this.store.flush();
+    await this.flushEvents();
   }
+  async flushEvents() { await this.eventMutex.run(async () => {}); await this.store.flush(); }
 }
 
 export class RunExecution {

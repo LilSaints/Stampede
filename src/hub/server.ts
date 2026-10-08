@@ -143,7 +143,16 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     if (name === 'read_board') return { entries: bus.board(input.topic, input.sinceSeq, input.max), lastSeq: bus.entries.at(-1)?.seq ?? 0 };
     if (name === 'mark_done') { a.markedDone = true; execution.peers.get(a.name)!.markedDone = true; await execution.event('agent.status', { name: a.name, markedDone: true }); return { ok: true, reminder: 'End your turn now with your final answer, matching the schema if supplied. mark_done does not store your result.' }; }
   }
-  const server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+  const requests = new Set<Promise<void>>();
+  const maintenance = new Set<Promise<unknown>>();
+  function track(set: Set<Promise<unknown>>, task: Promise<unknown>) {
+    set.add(task); void task.finally(() => set.delete(task)).catch(error => manager.emit('internalError', error));
+  }
+  const server = createServer((request: IncomingMessage, response: ServerResponse) => {
+    if (stopping) { response.writeHead(503); response.end('hub is shutting down'); return; }
+    track(requests, handleRequest(request, response));
+  });
+  async function handleRequest(request: IncomingMessage, response: ServerResponse) {
     lastRequest = Date.now();
     const abort = new AbortController(); response.once('close', () => { if (!response.writableFinished) abort.abort(); });
     try {
@@ -174,17 +183,28 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       } else throw Object.assign(new Error('route not found'), { statusCode: 404 });
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result ?? {}));
     } catch (error) { if (!response.headersSent) response.writeHead((error as any).statusCode ?? 400, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: (error as Error).message, code: (error as any).code ?? 'request_failed' })); }
-  });
+  }
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const port = (server.address() as any).port; manager.hubUrl = `http://127.0.0.1:${port}`;
   await store.write(path.join(home, 'hub.json'), { pid: process.pid, port, token_sha256: hash(token), started_at: new Date().toISOString(), version: VERSION });
   const interval = setInterval(() => {
     manager.scheduler.tick();
-    if (Date.now() >= nextCollection) { nextCollection = Date.now() + 86400000; void collectRuns(store, config).catch(error => { security.warnings.push(`retention failed: ${error.message}`); }); }
-    for (const execution of manager.active.values()) void execution.bus.expire().then(() => execution.releaseIdle()).catch(error => execution.fail(error));
+    if (Date.now() >= nextCollection) { nextCollection = Date.now() + 86400000; track(maintenance, collectRuns(store, config).catch(error => { security.warnings.push(`retention failed: ${error.message}`); })); }
+    for (const execution of manager.active.values()) track(maintenance, execution.bus.expire().then(() => execution.releaseIdle()).catch(error => execution.fail(error)));
     if (!manager.active.size && Date.now() - lastRequest > config.hub.idleShutdownMin * 60000) void close();
   }, 1000);
-  async function close() { if (stopping) return; stopping = true; clearInterval(interval); await manager.shutdown(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(lockPath, { force: true }); await security.close(); }
+  let closing: Promise<void> | undefined;
+  function close(): Promise<void> {
+    if (closing) return closing;
+    stopping = true; clearInterval(interval);
+    closing = (async () => {
+      await manager.shutdown(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await Promise.allSettled([...requests, ...maintenance]);
+      await manager.shutdown(); await rm(lockPath, { force: true }); await security.close();
+    })();
+    return closing;
+  }
   return { manager, server, token, port, security, close };
   } catch (error) {
     if (ownsLock) await rm(lockPath, { force: true });

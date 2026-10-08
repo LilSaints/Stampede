@@ -42,7 +42,9 @@ return {review,panel,value};` });
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('four mixed workers use real MCP for 600 ordered deliveries, then reserve progress and idle resume', { timeout: 120000 }, async () => {
+const schedules = Number(process.env.STAMPEDE_CONCURRENCY_SEEDS ?? 1);
+if (!Number.isInteger(schedules) || schedules < 1 || schedules > 1000) throw new Error('STAMPEDE_CONCURRENCY_SEEDS must be 1..1000');
+test('four mixed workers use real MCP for 600 ordered deliveries, then reserve progress and idle resume', { timeout: 120000 * schedules }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-transport-'));
   const cwd = path.join(root, 'work'); await mkdir(cwd);
   const config = defaults(); config.defaultBackend = 'codex';
@@ -56,7 +58,9 @@ test('four mixed workers use real MCP for 600 ordered deliveries, then reserve p
   const hub = await startHub({ home: path.join(root, 'state'), config, backends, cliEntry: path.resolve('dist/cli.js') });
   const members = ['claude', 'codex', 'claude', 'codex'].map((backend, i) => ({ name: `peer-${i}`, backend, prompt: 'fixture:burst', schema: { type: 'object', properties: { received: { type: 'integer' }, ordered: { type: 'boolean' }, unique: { type: 'integer' } }, required: ['received', 'ordered', 'unique'], additionalProperties: false } }));
   try {
-    const burst = await hub.manager.start({ cwd, args: { members }, script: meta + 'const t=await spawnTeam(args.members); const observed=await t.untilDone(undefined,{maxMs:60000}); return {observed,results:await t.results()};' });
+    for (let seed = 1; seed <= schedules; seed++) {
+    members.forEach(member => { member.prompt = `fixture:burst:${seed}`; });
+    const burst = await hub.manager.start({ cwd, args: { members }, script: meta + 'const t=await spawnTeam(args.members); let quiet; for(let i=0;i<2400;i++){quiet=await t.untilQuiet({idleMs:0,maxMs:25}); if(quiet.reason!=="max-ms") break;} const observed=await t.untilDone(undefined,{maxMs:60000}); return {quiet,observed,results:await t.results()};' });
     const execution = hub.manager.active.get(burst.runId)!;
     // The bucket itself has unit coverage. This probe isolates transport order
     // and acknowledges all 600 worker deliveries without rate-limit sleeps.
@@ -65,6 +69,7 @@ test('four mixed workers use real MCP for 600 ordered deliveries, then reserve p
     const burstRun = hub.manager.get(burst.runId), result = burstRun.result as any;
     assert.equal(burstRun.status, 'completed', JSON.stringify(burstRun.error));
     assert.equal(result.observed.reason, 'all-terminal');
+    assert.equal(result.quiet.reason, 'all-done', 'the burst must never report false quiescence');
     for (const member of Object.values(result.results) as any[]) {
       assert.equal(member.status, 'done', JSON.stringify(burstRun.agents.map(a => a.error)));
       assert.deepEqual(member.result, { received: 150, ordered: true, unique: 150 });
@@ -96,5 +101,15 @@ test('four mixed workers use real MCP for 600 ordered deliveries, then reserve p
     assert.equal(hub.manager.scheduler.snapshot().queued.length, 0);
     assert.ok(hub.manager.get(queued.runId).agents.every(a => a.status === 'cancelled'));
     await hub.manager.control(idle.runId, 'cancel');
+    await resumed.task;
+    await hub.manager.flushEvents();
+    // Retain assertion/progress output, not thousands of disposable run logs.
+    for (const runId of [burst.runId, waiting.runId, idle.runId, queued.runId]) {
+      const directory = hub.manager.store.runDir(runId);
+      assert.equal(path.dirname(directory), path.join(root, 'state', 'runs'));
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 }); hub.manager.runs.delete(runId);
+    }
+    if (schedules > 1 && (seed % 25 === 0 || seed === schedules)) process.stdout.write(`Qualified mixed-process schedules: ${seed}/${schedules}\n`);
+    }
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
 });
