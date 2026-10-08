@@ -16,6 +16,7 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
   await writeFile(path.join(cwd, 'reviewed.txt'), 'original\n');
   await git(cwd, ['add', '.']); await git(cwd, ['commit', '-m', 'fixture']);
   const config = defaults(); config.defaultBackend = 'codex';
+  config.scheduler.maxConcurrent = 4; config.scheduler.perRun = 4; config.scheduler.codex.maxConcurrent = 3;
   const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-codex.mjs'), version: '0.159.2', capabilities: {} };
   const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { available: false, capabilities: {} } } });
   const complete = async (started: { runId: string }) => {
