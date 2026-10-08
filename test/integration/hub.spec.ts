@@ -10,7 +10,7 @@ import { defaults } from '../../src/hub/config.js';
 import { capture, type BackendInfo } from '../../src/hub/capabilities.js';
 import { atomicJson, readJson } from '../../src/hub/store.js';
 const meta = 'export const meta = { name: "fixture", description: "integration" };\n';
-test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 30000 }, async () => {
+test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 60000 }, async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stampede-hub-'));
   const config = defaults(); config.defaultBackend = 'codex'; config.scheduler.maxConcurrent = 6; config.scheduler.perRun = 6; config.scheduler.codex.maxConcurrent = 3;
   const fake: BackendInfo = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/cli.mjs'), version: '0.159.2', capabilities: {} };

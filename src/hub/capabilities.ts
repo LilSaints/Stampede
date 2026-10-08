@@ -34,7 +34,10 @@ export async function probeBackends(config: Config, home?: string): Promise<Reco
   async function probe(name: 'claude' | 'codex'): Promise<BackendInfo> {
     let binary: string | undefined, entry: string | undefined;
     try {
-      if (name === 'claude') binary = config.claude.binary ?? await findExecutable('claude');
+      if (name === 'claude') {
+        binary = config.claude.binary ?? await findExecutable('claude');
+        if (/\.[cm]?js$/i.test(binary)) { entry = path.resolve(binary); binary = process.execPath; }
+      }
       else {
         const candidates = [config.codex.entry, path.join(process.env.APPDATA ?? path.join(os.homedir(), '.npm-global'), 'npm', 'node_modules', '@openai', 'codex', 'bin', 'codex.js'), ...((process.env.PATH ?? '').split(path.delimiter).map(dir => path.join(dir, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')))];
         for (const candidate of candidates) if (candidate) { try { await access(candidate); entry = candidate; break; } catch {} }

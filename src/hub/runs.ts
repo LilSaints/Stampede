@@ -31,7 +31,7 @@ interface AgentContext {
   key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean;
   finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
 }
-interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord }
+interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
 export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
@@ -128,7 +128,12 @@ export class RunManager extends EventEmitter {
     else throw new Error('invalid run action');
     return { status: run.status };
   }
-  async shutdown() { await Promise.all([...this.active.values()].map(e => e.cancel('interrupted'))); await this.store.flush(); }
+  async shutdown() {
+    const executions = [...this.active.values()];
+    await Promise.all(executions.map(e => e.cancel('interrupted')));
+    await Promise.allSettled(executions.map(e => e.task));
+    await this.store.flush();
+  }
 }
 
 export class RunExecution {
@@ -142,6 +147,7 @@ export class RunExecution {
   task?: Promise<void>;
   runtime?: ReturnType<typeof executeWorkflow>;
   draining = false;
+  private cancellation?: Promise<void>;
   constructor(readonly manager: RunManager, readonly run: Run, readonly config: Config) {
     this.bus = new MessageBus(run.id, this.peers, { ...config.limits, claimLeaseMs: config.delivery.claimLeaseMs }, async (kind, value) => {
       await manager.store.append(path.join(manager.store.runDir(run.id), kind === 'board.posted' ? 'board.jsonl' : 'messages.jsonl'), { kind, value });
@@ -176,6 +182,8 @@ export class RunExecution {
     } catch (error) {
       if (!runTerminal(this.run.status)) { this.run.error = { message: (error as Error).message, stack: (error as Error).stack }; await this.cancel('failed'); }
     } finally {
+      await this.cancellation;
+      await Promise.allSettled([...this.teams.values()].map(team => team.admission));
       await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
       await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'run.json'), this.run);
       for (const c of this.contexts.values()) { c.token = ''; for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.agentDir(c.agent), file), { force: true }); }
@@ -404,10 +412,15 @@ export class RunExecution {
       }
     }
   }
-  async cancel(status: Run['status'] = 'cancelled') {
-    if (runTerminal(this.run.status)) return;
+  cancel(status: Run['status'] = 'cancelled'): Promise<void> {
+    if (this.cancellation) return this.cancellation;
+    if (runTerminal(this.run.status)) return Promise.resolve();
+    this.cancellation = this.cancelNow(status); return this.cancellation;
+  }
+  private async cancelNow(status: Run['status']) {
     this.run.status = status; this.run.endedAt = now(); this.abort.abort();
-    await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
+    await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
+    await Promise.allSettled([...this.teams.values()].map(team => team.admission));
     this.manager.scheduler.pause(this.run.id, false); await this.event('run.status', { status });
   }
   async controlAgent(name: string, action: string) {
@@ -418,7 +431,7 @@ export class RunExecution {
       else if (c.agent.status === 'idle') { c.task = this.turn(c, c.prompt, Boolean(c.agent.sessionId)); void c.task.catch(e => this.fail(e)); }
       else throw new Error('agent has no active or idle turn to retry');
     } else if (action === 'skip' || action === 'cancel') {
-      c.requestedTerminal = action === 'skip' ? 'skipped' : 'cancelled'; c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await this.finish(c, c.requestedTerminal);
+      c.requestedTerminal = action === 'skip' ? 'skipped' : 'cancelled'; c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await this.finish(c, c.requestedTerminal);
     } else throw new Error('invalid agent action');
     return { status: c.agent.status };
   }
@@ -426,9 +439,16 @@ export class RunExecution {
     const members = names.map(n => this.contexts.get(n)!);
     const deadline = Date.now() + this.config.limits.drainMs;
     while (members.some(c => c.agent.markedDone && !agentTerminal(c.agent.status) && c.agent.status !== 'idle') && Date.now() < deadline) await sleep(25);
+    for (const c of members) c.abort.abort();
+    const stoppedTeams = [...this.teams.values()].filter(team => team.names.every(name => {
+      const c = this.contexts.get(name)!; return c.abort.signal.aborted || agentTerminal(c.agent.status);
+    }));
+    for (const team of stoppedTeams) team.admissionAbort?.abort();
+    await Promise.allSettled(stoppedTeams.map(team => team.admission));
     for (const c of members) {
+      const handle = c.handle; await handle?.kill(); await handle?.done;
+      await c.task?.catch(() => {});
       if (agentTerminal(c.agent.status)) continue;
-      c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done;
       await this.finish(c, c.agent.status === 'idle' && c.agent.result !== undefined ? 'done' : 'cancelled');
     }
   }
@@ -461,8 +481,9 @@ export class RunExecution {
       await this.recordTeam(team);
       return { id, names };
     }
-    const admission = this.manager.scheduler.acquire(contexts.map(c => this.slot(c)), this.abort.signal);
-    void admission.then(release => { for (const c of contexts) { c.task = this.dispatch(c, release); void c.task.catch(e => this.fail(e)); } }).catch(async error => {
+    team.admissionAbort = new AbortController();
+    const admission = this.manager.scheduler.acquire(contexts.map(c => this.slot(c)), AbortSignal.any([this.abort.signal, team.admissionAbort.signal]));
+    team.admission = admission.then(release => { for (const c of contexts) { c.task = this.dispatch(c, release); void c.task.catch(e => this.fail(e)); } }).catch(async error => {
       for (const c of contexts) { c.agent.error = { kind: error instanceof AdmissionError ? 'admission_timeout' : error.kind ?? 'cancelled', message: error.message, blockedBy: error.blockedBy, waitedMs: error.waitedMs }; await this.finish(c, error instanceof AdmissionError || error.kind ? 'failed' : 'cancelled'); }
       if (error instanceof AdmissionError) await this.event('team.admission_blocked', { names, blockedBy: error.blockedBy });
     });

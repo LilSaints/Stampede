@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLaunch } from './adapter.js';
 export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
-  const argv = ['-p', '--output-format', 'stream-json', '--verbose', resumeSessionId ? '--resume' : '--session-id', resumeSessionId ?? randomUUID(), '--append-system-prompt', a.contract, '--mcp-config', a.mcpPath, '--settings', a.settingsPath];
+  const argv = [...(a.entry ? [a.entry] : []), '-p', '--output-format', 'stream-json', '--verbose', resumeSessionId ? '--resume' : '--session-id', resumeSessionId ?? randomUUID(), '--append-system-prompt', a.contract, '--mcp-config', a.mcpPath, '--settings', a.settingsPath];
   if (!a.inheritMcpServers) argv.push('--strict-mcp-config');
   if (!a.comms && a.persistNonComms === false) argv.push('--no-session-persistence');
   if (a.settingSources !== undefined) argv.push('--setting-sources', a.settingSources);
