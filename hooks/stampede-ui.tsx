@@ -73,7 +73,7 @@ async function state($: Engine) { return (await $.state.get({ plugin: 'stampede'
 async function change($: Engine, fn: (s: StampedeUiState) => StampedeUiState) {
   await update($, { plugin: 'stampede', key: 'ui' }, current => fn(current ?? initialState()));
 }
-async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stampede', title: 'Stampede', closeOnEscape: true }); await change($, s => ({ ...s, paneOpen: true })); if (!placed.isPlaced) $.ui.toast('Stampede: /stampede to open the pane'); }
+async function openPane($: Engine, focus = true) { const placed = await $.ui.open({ id: 'stampede', title: 'Stampede', closeOnEscape: true, ...(focus ? { focus: true as const } : {}) }); await change($, s => ({ ...s, paneOpen: true })); if (!placed.isPlaced) $.ui.toast('Stampede: /stampede to open the pane'); }
 
   async function home($: Engine) { return (await state($)).stampedeHome ?? (await $.env.get('STAMPEDE_HOME')) ?? `${(await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))}/.stampede`; }
   async function request($: Engine, route: string, body?: unknown) {
@@ -172,7 +172,7 @@ export const register: Register = (on, options) => {
     if (['workflow_run', 'workflow_resume'].includes(tool)) {
       const value: any = (result as any).result;
       let data; try { data = typeof value === 'string' ? JSON.parse(value) : value?.content ? JSON.parse(value.content.find((c: any) => c.type === 'text')?.text ?? '{}') : value; } catch {}
-      if (data?.runId) { const held = await state($); await change($, s => ({ ...s, ownedRunIds: [...new Set([...s.ownedRunIds, data.runId])], selectedRunId: data.runId, lastPoll: 0 })); if (!held.ownedRunIds.length) await openPane($); }
+      if (data?.runId) { const held = await state($); await change($, s => ({ ...s, ownedRunIds: [...new Set([...s.ownedRunIds, data.runId])], selectedRunId: data.runId, lastPoll: 0 })); if (!held.ownedRunIds.length) await openPane($, false); }
     }
     return result;
   });
@@ -201,7 +201,7 @@ export const register: Register = (on, options) => {
     return <Box flexDirection="column">
       {!held.hub.ok && <Text>{clean(held.hub.lastError ?? 'Hub not running', 200)}</Text>}
       {held.hub.versionMismatch && <Text>Plugin and hub versions differ — restart the hub</Text>}
-      <Box>{runs.map((r, i) => <Button key={`run-${i}`} hotkey={String(i + 1)} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId })); }}>{`${i + 1} ${held.ownedRunIds.includes(r.runId) ? '' : 'other: '}${clean(r.name, 30)}`}</Button>)}</Box>
+      <Box flexDirection={width < 60 ? 'column' : 'row'} flexWrap="wrap">{runs.map((r, i) => <Button key={`run-${i}`} hotkey={String(i + 1)} onPress={() => { void change($, s => ({ ...s, selectedRunId: r.runId })); }}>{`${i + 1} ${held.ownedRunIds.includes(r.runId) ? '' : 'other: '}${clean(r.name, 30)}`}</Button>)}</Box>
       {run ? <Box flexDirection="column">
         <Text dimColor={!held.hub.ok}>{runHeading(run, renderedAt)}</Text>
         {held.actionPending && <Text>Updating…</Text>}

@@ -64,6 +64,7 @@ if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || p
       await tool('send_message', { to: 'orchestrator', text: 'fixture complete' });
       await tool('mark_done', {});
       if (prompt === 'fixture:team-delayed') await new Promise(resolve => setTimeout(resolve, 600));
+      if (prompt === 'fixture:team-delayed-30s') await new Promise(resolve => setTimeout(resolve, 30000));
     }
   } finally { await client.close(); }
 }
