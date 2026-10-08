@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 let prompt = '';
@@ -23,6 +24,33 @@ if (/^fixture:recovery:[ab]$/.test(prompt)) {
   }
 }
 let scenarioOutput;
+// A first turn that records a session to resume and leaves work in its workspace, then stops answering
+// while the hub is killed under it. Continued, it reports the session it resumed and the work it found;
+// started again where the work already is, it says so.
+// The work marker is in the worktree for Codex (an edit agent) and beside the session for Claude, a
+// read-only agent that must not change the project its call is keyed on.
+const marker = () => codex ? 'partial.txt' : path.join(process.env.CLAUDE_CONFIG_DIR ?? '.', 'partial.txt');
+if (prompt.startsWith('fixture:continue')) {
+  let partial; try { partial = await readFile(marker(), 'utf8'); } catch {}
+  if (partial) scenarioOutput = `restarted with ${partial}`;
+  else {
+    if (codex) {
+      const day = path.join(process.env.CODEX_HOME, 'sessions', '2026', '10', '09');
+      await mkdir(day, { recursive: true }); await writeFile(path.join(day, `rollout-fixture-${id}.jsonl`), '{}\n');
+      emit({ type: 'thread.started', thread_id: id });
+    } else {
+      const dir = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', process.cwd().replace(/[^a-zA-Z0-9]/g, '-'));
+      await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, `${id}.jsonl`), '{}\n');
+      emit({ type: 'system', subtype: 'init', session_id: id });
+    }
+    await writeFile(marker(), prompt);
+    await new Promise(() => { setInterval(() => {}, 1000); });
+  }
+}
+if (prompt.startsWith('Your previous turn on this task was interrupted')) {
+  let partial = 'nothing'; try { partial = await readFile(marker(), 'utf8'); } catch {}
+  scenarioOutput = `continued ${resume >= 0 ? id : 'without a session'} with ${partial}`;
+}
 if (prompt.startsWith('Adversarially verify: fixture-')) scenarioOutput = JSON.stringify({ isReal: prompt.endsWith('fixture-real') });
 const referenceJudge = /^Judge "(fixture-real|fixture-rejected)" via the (correctness|security|repro) lens/.exec(prompt);
 if (referenceJudge) scenarioOutput = JSON.stringify({ real: referenceJudge[1] === 'fixture-real' && referenceJudge[2] !== 'repro' });

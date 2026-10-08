@@ -1,8 +1,36 @@
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import os from 'node:os';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { VERSION } from '../hub/config.js';
 import { readJson } from '../hub/store.js';
+/**
+ * Starts the hub in a process of its own that outlives the one asking. A
+ * detached spawn stays in its launcher's Windows job and process tree, so an
+ * app update or a session ending (which ends that job or tree) kills the hub
+ * and the runs it holds. On Windows the hub is created through WMI instead
+ * (Win32_Process.Create), outside both, hidden and with this process's
+ * environment; if that fails, the detached spawn still starts it.
+ */
+export async function launchHub(cliEntry: string, home: string) {
+  const env = { ...process.env, STAMPEDE_HOME: home };
+  if (process.platform === 'win32') {
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "$vars = [string[]](Get-ChildItem env: | Where-Object { $_.Name -notlike 'STAMPEDE_LAUNCH_*' } | ForEach-Object { \"$($_.Name)=$($_.Value)\" })",
+      '$startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0; EnvironmentVariables = $vars }',
+      '$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $env:STAMPEDE_LAUNCH_COMMAND; CurrentDirectory = $env:STAMPEDE_LAUNCH_DIR; ProcessStartupInformation = $startup }',
+      'if ($result.ReturnValue -ne 0) { [Console]::Error.Write("Win32_Process.Create returned $($result.ReturnValue)"); exit 1 }',
+      '[Console]::Out.Write($result.ProcessId)'
+    ].join('\n');
+    const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const launched = await new Promise<boolean>(resolve => execFile(powershell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      env: { ...env, STAMPEDE_LAUNCH_COMMAND: `"${process.execPath}" "${cliEntry}" hub`, STAMPEDE_LAUNCH_DIR: os.homedir() }, windowsHide: true, timeout: 30000
+    }, (error, stdout) => resolve(!error && /^\d+$/.test(String(stdout).trim()))));
+    if (launched) return;
+  }
+  spawn(process.execPath, [cliEntry, 'hub'], { detached: true, stdio: 'ignore', windowsHide: true, shell: false, env }).unref();
+}
 export class HubClient {
   private url?: string;
   private token?: string;
@@ -22,8 +50,7 @@ export class HubClient {
     if (this.role === 'agent') return;
     try { await this.discover(); await this.request('/health', undefined, false); return; }
     catch (error) { if ((error as Error).message.startsWith('blocked:') || !autoStart) throw error; }
-    const child = spawn(process.execPath, [this.cliEntry, 'hub'], { detached: true, stdio: 'ignore', windowsHide: true, shell: false, env: { ...process.env, STAMPEDE_HOME: this.home } });
-    child.unref();
+    await launchHub(this.cliEntry, this.home);
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
       try { await this.discover(); await this.request('/health', undefined, false); return; } catch (error) { if ((error as Error).message.startsWith('blocked:')) throw error; }

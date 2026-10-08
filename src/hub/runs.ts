@@ -10,7 +10,7 @@ import { launchTurn } from '../backends/procs.js';
 import { codexSchema, jsonAnswer, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
 import { externalTools } from '../backends/tool-usage.js';
-import { claudeContext, claudeReplies, claudeTranscriptSize, claudeWindow, codexContext } from '../backends/context.js';
+import { claudeContext, claudeReplies, claudeSessionExists, claudeTranscriptSize, claudeWindow, codexContext, codexThreadExists } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
@@ -18,7 +18,7 @@ import { Scheduler, AdmissionError } from './scheduler.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
 import { type Agent, type AgentOpts, type Run, agentTerminal, runTerminal } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
-import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, repoRoot, resolveCommit } from './workspaces.js';
+import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, git, repoRoot, resolveCommit } from './workspaces.js';
 
 const now = () => new Date().toISOString();
 const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -35,7 +35,11 @@ interface AgentContext {
   shared: { reads: string[]; writes: string[] };
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
-export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; limits?: Partial<Config['limits']> }
+/** What an agent cut off by a stopping hub records, so a resumed run can continue it. */
+const INTERRUPTED = { kind: 'interrupted', message: 'the hub stopped during this agent\'s turn' };
+/** The first prompt of a continued agent, in the session that holds the original task. */
+const CONTINUE_PROMPT = 'Your previous turn on this task was interrupted before it finished: the Stampede hub stopped. This session and your workspace, with any changes you made, are as you left them. Check where you stopped, continue the original task, and end with the final answer it asks for.';
+export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; continueInterrupted?: boolean; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
 export class RunManager extends EventEmitter {
@@ -63,7 +67,7 @@ export class RunManager extends EventEmitter {
       if (!runTerminal(run.status)) {
         for (const agent of run.agents) {
           await this.recoverAgent?.(agent);
-          if (!agentTerminal(agent.status)) agent.status = 'cancelled';
+          if (!agentTerminal(agent.status)) { agent.status = 'cancelled'; agent.error = { ...INTERRUPTED }; }
           for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.store.runDir(id), 'agents', agent.id, file), { force: true });
         }
         run.counters.agentsRunning = 0; run.status = 'interrupted'; run.endedAt = now();
@@ -111,7 +115,7 @@ export class RunManager extends EventEmitter {
     const id = `run_${ulid()}`; const directory = this.store.runDir(id);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const scriptPath = path.join(directory, 'script.js'); await writeFile(scriptPath, source, { mode: 0o600 });
-    const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
+    const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), ...(resumeOf && input.continueInterrupted === false ? { continueInterrupted: false } : {}), cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
     run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
@@ -125,9 +129,9 @@ export class RunManager extends EventEmitter {
     void execution.task.catch(error => { this.emit('internalError', error); });
     return { runId: id, status: run.status, scriptPath, cacheHits: 0, liveCalls: 0, ...run.cacheReport };
   }
-  async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string }) {
+  async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string; continueInterrupted?: boolean }) {
     const old = this.get(id); if (!runTerminal(old.status)) throw new Error('only terminal runs may be resumed');
-    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title }, id);
+    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title, continueInterrupted: input.continueInterrupted }, id);
   }
   async control(id: string, action: string) {
     const run = this.get(id), execution = this.active.get(id);
@@ -354,6 +358,7 @@ export class RunExecution {
     const { notify: _notify, ...opts } = c.opts;
     c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType, base: c.base }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
     if (previousKey !== c.key) c.occ = this.cache.next(c.key);
+    c.agent.callKey = c.key; c.agent.callOcc = c.occ;
     c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && c.agent.access !== 'full' && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
     if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
   }
@@ -375,6 +380,15 @@ export class RunExecution {
           this.run.cacheHits++; await this.finish(c, 'done'); return;
         }
       }
+      // An agent the resumed run lost mid-turn when the hub stopped continues its own session, in its own worktree.
+      const prior = await this.interrupted(c);
+      if (prior) {
+        c.agent.workspace = { ...prior.workspace }; c.agent.sessionId = prior.sessionId; c.agent.continues = { runId: this.run.resumeOf!, agentId: prior.id };
+        await this.note(`${c.agent.name}: continuing its interrupted session${prior.workspace.kind === 'worktree' ? ' and worktree' : ''} from ${this.run.resumeOf}`);
+        await this.configure(c); this.run.liveCalls++;
+        await this.turn(c, CONTINUE_PROMPT, true);
+        return;
+      }
       if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name, c.base).catch(error => { throw Object.assign(error, { kind: 'workspace' }); }); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
       await this.configure(c);
       this.run.liveCalls++;
@@ -387,6 +401,22 @@ export class RunExecution {
     } finally {
       if (agentTerminal(c.agent.status)) { c.release?.(c.agent.id); c.release = undefined; }
     }
+  }
+  /**
+   * The agent of the resumed run that this call is (same key and occurrence),
+   * if the hub stopped during its turn and its session, and its worktree where
+   * it had one, are still there. Messaging agents and team members start
+   * again, as does an agent another run already continued.
+   */
+  private async interrupted(c: AgentContext) {
+    const old = this.run.resumeOf ? this.manager.runs.get(this.run.resumeOf) : undefined;
+    if (!old || old.status !== 'interrupted' || this.run.continueInterrupted === false || c.agent.comms.enabled || c.agent.teamId) return undefined;
+    const prior = old.agents.find(a => a.callKey === c.key && a.callOcc === c.occ && a.status === 'cancelled' && a.error?.kind === 'interrupted' && a.backend === c.agent.backend && a.sessionId && a.turns.length);
+    if (!prior || [...this.manager.runs.values()].some(run => run.agents.some(a => a.continues?.agentId === prior.id))) return undefined;
+    const worktreeGone = prior.workspace.kind === 'worktree' && await git(prior.workspace.path, ['rev-parse', '--abbrev-ref', 'HEAD']).then(head => head !== prior.workspace.branch, () => true);
+    const sessionGone = !worktreeGone && !await (prior.backend === 'claude' ? claudeSessionExists(prior.sessionId!, prior.workspace.path) : codexThreadExists(prior.sessionId!));
+    if (worktreeGone || sessionGone) { await this.note(`${c.agent.name}: interrupted in ${old.id}, but its ${worktreeGone ? 'worktree' : 'session'} is gone, so it starts again`); return undefined; }
+    return prior;
   }
   private async configure(c: AgentContext) {
     const a = c.agent, backend = this.manager.backends[a.backend];
@@ -431,7 +461,10 @@ export class RunExecution {
       const resumed = resume || kind === 'schema-repair' ? a.sessionId : undefined;
       if (a.backend === 'claude') this.claudeRead.set(a.id, { offset: resumed ? await claudeTranscriptSize(resumed, a.workspace.path) : 0, replies: new Map(), at: 0, reading: false });
       c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => {
-        a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id;
+        a.lastActivityAt = now();
+        // Saved as soon as known: a hub killed mid-turn leaves only what is on disk to continue from.
+        const session = event.thread_id ?? event.session_id;
+        if (session && session !== a.sessionId) { a.sessionId = session; void this.event('agent.session', { name: a.name }).catch(() => {}); }
         const tools = externalTools(event);
         if (tools.length) a.externalTools = [...new Set([...(a.externalTools ?? []), ...tools])].slice(0, 100);
         if (a.backend === 'claude') {
@@ -557,9 +590,11 @@ export class RunExecution {
     this.cancellation = this.cancelNow(status); return this.cancellation;
   }
   private async cancelNow(status: Run['status']) {
+    const cut = [...this.contexts.values()].filter(c => !agentTerminal(c.agent.status));
     this.run.status = status; this.run.endedAt = now(); this.abort.abort();
     await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await c.finishing; if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
     await Promise.allSettled([...this.teams.values()].map(team => team.admission));
+    if (status === 'interrupted') for (const c of cut) if (c.agent.status === 'cancelled') c.agent.error = { ...INTERRUPTED };
     this.manager.scheduler.pause(this.run.id, false); await this.event('run.status', { status });
   }
   async controlAgent(name: string, action: string) {

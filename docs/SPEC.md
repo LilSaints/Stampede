@@ -158,7 +158,7 @@ The **Stampede mod** is not a process: it is a hooks module loaded by Claude Cod
 - Hub state dir: `STAMPEDE_HOME` (default `%USERPROFILE%\.stampede`, `~/.stampede` elsewhere).
 - `hub.json` = `{pid, port, token_sha256, started_at, version}`; the raw orchestrator token is in `hub.token`, regenerated on every hub start and also used by the mod (§20.4) (file ACL: current user only; on Windows set via `icacls` equivalent API or created under the user profile which is already user-private — verify in `doctor`).
 - Single instance: hub acquires an exclusive lock on `hub.lock` (open with exclusive flag; stale-lock detection by checking `pid` alive AND process image name is `node`/`stampede`). Second instance exits 0 after confirming the live hub answers `/health`.
-- A shim that cannot reach a healthy hub MUST start one detached (`child_process.spawn(process.execPath, [entry, 'hub'], {detached:true, stdio:'ignore', windowsHide:true}).unref()`), then poll `/health` for up to 10 s.
+- A shim that cannot reach a healthy hub MUST start one detached, then poll `/health` for up to 10 s. On Windows the hub MUST be created outside the shim's job object and process tree, because a Claude Code session's tree (and the desktop app's) is ended on an app update or session exit, and a hub inside it dies with every run it holds (observed 2026-10-08). A `detached` spawn stays in both; the hub is therefore created through WMI (`Win32_Process.Create` via Windows PowerShell, parent `WmiPrvSE.exe`, the user's interactive session, hidden window, the shim's environment passed in full), and only if that fails through `child_process.spawn(process.execPath, [entry, 'hub'], {detached:true, stdio:'ignore', windowsHide:true}).unref()`, the only path on POSIX. `stampede hub --detach` (with or without `--restart`) starts it the same way.
 - Shims and the mod re-read `hub.json` and `hub.token` on any connection error or HTTP 401 (the hub may have restarted on a new port with a new token). Agent shims are unaffected by an orchestrator-token change: their per-agent tokens are re-validated against the restored run state, and runs interrupted by a hub restart revoke them anyway (§16.3).
 - Version skew: if `hub.json.version` ≠ shim version, the shim MUST report `blocked: hub version X, shim version Y; run 'stampede hub --restart' after runs finish` rather than talk to it. `--restart` refuses while runs are active unless `--force`.
 
@@ -560,7 +560,7 @@ Exposed by `stampede mcp --role orchestrator`. All outputs are compact JSON (the
 | `workflow_send` | `{runId, to: string, text: string}` | `{seq, deliveredTo, queuedFor}` — steering. `to` may be `'*'`. |
 | `workflow_control` | `{runId, action: 'pause'\|'resume'\|'cancel', reason?}` | `{status}`. Pause: no new starts/resumes; running turns finish; script promises stay pending. |
 | `agent_control` | `{runId, agent: string, action: 'skip'\|'retry'\|'cancel'}` | `{status}`. `skip` → agent's `agent()` resolves `null` (parity); `retry` → kill current turn and re-run it (counts as a retry). |
-| `workflow_resume` | `{runId /*old*/, scriptPath?: string, args?: any}` | `{runId /*new*/, cacheHits, …}` (§16). |
+| `workflow_resume` | `{runId /*old*/, scriptPath?: string, args?: any, continueInterrupted?: boolean /*default true*/}` | `{runId /*new*/, cacheHits, …}` (§16). Resuming an `interrupted` run continues the agents the hub stopped mid-turn (§16.3). |
 | `workflow_list` | `{status?, limit?: number /*default 20*/}` | `{runs:[{runId, name, status, createdAt, elapsedSec}]}` |
 | `workflow_saved` | `{action:'list'\|'save'\|'show', name?, scriptPath?}` | List/save/show saved workflows. |
 | `stampede_doctor` | `{}` | Versions, backend health, hub info, spike-derived capability flags (§12.6). |
@@ -854,6 +854,8 @@ Project-local: `<repo>/.stampede/worktrees/…` only.
 
 ### 16.3 Crash recovery
 On hub start: every run with `status ∈ {running, paused}` → `interrupted`; agent processes killed (§5.3); worktrees left intact. `workflow_list` shows them; `workflow_resume` continues them.
+
+**Continuing interrupted agents.** An agent the hub stopped during its turn (killed, or a graceful shutdown with active runs) ends `cancelled` with `error.kind: 'interrupted'`, keeping its session id (saved to `run.json` as soon as the backend reports it) and its worktree; each agent also records its call's cache key and occurrence. When `workflow_resume` resumes an `interrupted` run, a call that misses the cache and matches such an agent by key and occurrence continues it: the new agent takes over its worktree and resumes its Claude session or Codex thread with a fixed prompt (the turn was interrupted; the session and workspace are as left; continue the original task and give its final answer), and records `continues: {runId, agentId}` (`continued` in `workflow_status` agents). It starts again from scratch instead when its worktree is gone or its session is gone (no Claude transcript, no Codex rollout), each said in the run log, and when it messages or belongs to a team, another run already continued it, or the resume passed `continueInterrupted: false`. A changed input changes the key, so such a call never continues stale work. A user's own cancel or skip is never continued.
 
 ### 16.4 Cache key and policy
 A **call record** in `journal.jsonl`:

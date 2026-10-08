@@ -93,6 +93,12 @@ export async function claudeTranscriptSize(sessionId: string, cwd: string, home 
   return file ? (await stat(file).catch(() => undefined))?.size ?? 0 : 0;
 }
 const claudeHome = () => process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
+/** Whether a Claude session can still be resumed from `cwd`: its transcript is where Claude keeps it. */
+export async function claudeSessionExists(sessionId: string, cwd: string, home = claudeHome()) { return Boolean(await claudeTranscript(sessionId, cwd, home)); }
+/** Whether a Codex thread can still be resumed: its rollout is in the sessions folder. */
+export async function codexThreadExists(threadId: string, home = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')) {
+  return /^[\w-]+$/.test(threadId) && Boolean(rollouts.get(threadId) ?? await findRollout(path.join(home, 'sessions'), threadId));
+}
 /** Claude names a project's folder after its path, each other character a dash; a long path's differs, so the rest are looked through. */
 async function claudeTranscript(sessionId: string, cwd: string, home: string) {
   if (!/^[\w-]+$/.test(sessionId)) return undefined;

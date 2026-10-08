@@ -229,3 +229,19 @@ test('an orchestrator shim reaches a hub restarted on another port without faili
     assert.ok(Array.isArray((await client.tool('workflow_list', {})).runs));
   } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });
+test('on Windows a hub the shim starts is created outside the shim\'s process tree', { skip: process.platform !== 'win32', timeout: 60000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-launch-'));
+  const home = path.join(root, 'state');
+  const client = new HubClient(home, path.resolve('dist/cli.js'), 'orchestrator');
+  await client.connect(true);
+  try {
+    // Created through WMI, so an app update or session exit that ends this process's job or tree leaves it running.
+    const { pid } = (await readJson<{ pid: number }>(path.join(home, 'hub.json')))!;
+    const parent = await capture('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$p = (Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}").ParentProcessId; (Get-CimInstance Win32_Process -Filter "ProcessId = $p").Name`]);
+    assert.equal(parent.stdout.trim().toLowerCase(), 'wmiprvse.exe');
+  } finally {
+    await client.request('/v1/hub/shutdown', {}).catch(() => {});
+    for (let i = 0; i < 100 && await readJson(path.join(home, 'hub.lock')); i++) await new Promise(r => setTimeout(r, 100));
+    await rm(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});

@@ -24,6 +24,10 @@ export interface Agent {
   externalTools?: string[];
   /** The resolved model and its latest request's size, for the UI. */
   model?: string; context?: { tokens: number; window?: number };
+  /** The call's cache key and occurrence, by which a resumed run finds this agent again. */
+  callKey?: string; callOcc?: number;
+  /** The interrupted agent of an earlier run whose session (and worktree) this one continued instead of starting again. */
+  continues?: { runId: string; agentId: string };
   /** Tokens the turn in flight has spent so far, counted as `usage` counts them; `usage` takes them over when it ends. */
   liveTokens?: number;
   /** How the worker pays: an API key's spend is real; a subscription's USD is only an estimate. */
@@ -39,6 +43,8 @@ export interface Run {
   notifyAgents?: boolean;
   /** The run's own name, given at workflow_run; `name` is it, or the script's meta.name without one. */
   title?: string;
+  /** false: a resume starts every interrupted agent again rather than continuing its session and worktree. */
+  continueInterrupted?: boolean;
   agents: Agent[]; log: string[]; phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
   cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };
