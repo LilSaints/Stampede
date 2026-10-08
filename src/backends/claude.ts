@@ -1,0 +1,26 @@
+import { randomUUID } from 'node:crypto';
+import type { AgentLaunch } from './adapter.js';
+export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
+  const argv = ['-p', '--output-format', 'stream-json', '--verbose', resumeSessionId ? '--resume' : '--session-id', resumeSessionId ?? randomUUID(), '--append-system-prompt', a.contract, '--mcp-config', a.mcpPath, '--settings', a.settingsPath];
+  if (!a.inheritMcpServers) argv.push('--strict-mcp-config');
+  if (a.settingSources !== undefined) argv.push('--setting-sources', a.settingSources);
+  if (a.model) argv.push('--model', a.model);
+  if (a.effort) argv.push('--effort', a.effort);
+  if (a.agentType) argv.push('--agent', a.agentType);
+  if (a.maxUsd !== undefined) argv.push('--max-budget-usd', String(a.maxUsd));
+  if (a.schema) { const json = JSON.stringify(a.schema); if (json.length > 24000) throw new Error('schema too large for Claude argv'); argv.push('--json-schema', json); }
+  const tools = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...(a.comms ? ['mcp__stampede__*'] : [])];
+  // Removing recursion tools also protects against instructions in project files.
+  const denied = ['Agent', 'Task', 'TeamCreate', 'TeamDelete'];
+  if (a.access === 'full') argv.push('--dangerously-skip-permissions');
+  else {
+    // Plan-mode system instructions forbid even truthfully annotated Stampede
+    // messaging writes. Explicit tool grants plus edit/shell denials preserve
+    // filesystem read-only access while allowing coordination.
+    if (a.access === 'read-only') { argv.push('--permission-mode', a.comms ? 'default' : 'plan'); denied.push('Edit', 'Write', 'NotebookEdit', 'Bash', 'PowerShell'); }
+    else { argv.push('--permission-mode', 'acceptEdits'); tools.push('Edit', 'Write', 'NotebookEdit', ...(a.editShellAllow ?? [])); if (!a.editShellAllow?.length) denied.push('Bash', 'PowerShell'); }
+    argv.push('--allowedTools', ...tools);
+  }
+  argv.push('--disallowedTools', ...denied);
+  return argv;
+}

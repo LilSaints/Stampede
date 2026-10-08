@@ -89,6 +89,24 @@ This result supports “not confined to workspace reads”; it does **not** supp
 
 Evidence: [direct sandbox results, including ACL and write controls](artifacts/s23-confirmed/s23.json), [real agent confirmation](artifacts/sessions-legacy-windows/summary.json). Probe: [s23-windows-sandbox.mjs](s23-windows-sandbox.mjs).
 
+## Implementation qualification — 2026-10-08
+
+Additional probes use Claude Code 2.1.292 and Codex 0.159.2. They are synthetic and retain raw output only in ignored local artifact directories.
+
+| Probe | Observed result | Consequence |
+|---|---|---|
+| S-1/S-2, `m0-launch.mjs` | Claude settings PostToolUse hook ran, inherited a nonce, and returned it to the model. MCP wait completed after 45,007 ms. | Claude hook and 45-second wait path retained. |
+| S-3/S-4/S-5 | Codex MCP configuration and developer instructions worked. Hook output was absent with ordinary flags, trust bypass, and a corrected regex matcher. | Codex uses explicit reads/waits and idle resume; hook delivery is not advertised. |
+| S-7, `s7-shared-home.mjs` | Eight concurrent conversations, each started then resumed twice: all 24 turns passed, IDs and original nonces matched, no database-lock/corruption signatures. | Shared CODEX_HOME retained, default concurrency 6 is within the observed 8. No authentication files copied. |
+| S-13, `s13-hook-startup.mjs` | 30 Windows hook launches: median 92.67 ms, p95 118.04 ms, max 122.37 ms. | Full CLI entry meets the 150 ms startup target; measurement excludes a hub round trip. |
+| Real pipeline, `v1-e2e.mjs` | Claude Haiku returned schema-conforming data, then Codex gpt-6-luna returned it unchanged. | Actual mixed-backend pipeline passed. |
+| Real team, first attempt | Codex coordinated, but Claude obeyed plan-mode instructions prohibiting mutating MCP tools. Team hit its observation deadline. | This attempt failed the team acceptance test despite the containing workflow ending normally. |
+| Real team, corrected permission profile | Both workers posted a board finding, sent an orchestrator message, read messages, marked done and returned `checked`. Observation ended `all-terminal`. | Read-only Claude workers with comms use default permission mode, explicit allowed coordination/read tools, and explicit file-edit/shell denials. Non-comms read-only workers still use plan mode. Tool annotations remain truthful. |
+
+Local evidence: `artifacts/m0-launch-20261008/summary.json`, `artifacts/m0-codex-trusted-hooks-20261008/summary.json`, `artifacts/m0-codex-regex-hooks-20261008/summary.json`, `artifacts/s7-shared-home-20261008/summary.json`, `artifacts/s13-hook-startup-20261008/summary.json`, `artifacts/v1-e2e-20261008-fixed/summary.json`, and `artifacts/v1-e2e-20261008-coordination/summary.json`.
+
+The installed Claude plugin harness also passes pane tests for terminal/desktop at widths 40/100/160, session-ID injection through `tool.call`, owner/seen-cursor wake filtering, debounce/busy/rate-limit behavior, and a 1,000-agent bounded-tree fixture. These validate host API behavior with fixtures, not manual painting or real desktop prompt submission. Interactive transport/wake checks remain a release gate.
+
 ## Reproducing the probes
 
 Run from the repository root in an environment permitted to start the local CLIs and make loopback connections. The session probes use the existing CLI login and create normal CLI session records. They do not edit saved user configuration or copy credentials. Use a fresh output directory for each run.

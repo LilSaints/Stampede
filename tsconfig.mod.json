@@ -1,0 +1,5 @@
+{
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  "compilerOptions": { "noEmit": true, "skipLibCheck": true },
+  "include": ["hooks", "types", ".claude-plugin/types/claude-code", ".claude-plugin/types/claude-code-tools", ".claude-plugin/types/claude-code-mcp"]
+}

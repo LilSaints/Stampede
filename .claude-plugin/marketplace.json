@@ -1,0 +1,6 @@
+{
+  "name": "stampede",
+  "owner": { "name": "LilSaints" },
+  "metadata": { "description": "Local multi-agent workflows for Claude Code and Codex" },
+  "plugins": [{ "name": "stampede", "source": "./", "description": "Local communicating workflows", "version": "0.1.0" }]
+}

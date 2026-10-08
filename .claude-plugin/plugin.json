@@ -1,0 +1,10 @@
+{
+  "name": "stampede",
+  "version": "0.1.0",
+  "description": "Run deterministic workflows over communicating Claude Code and Codex workers.",
+  "author": { "name": "Marco Santini" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "stampedeHome": { "type": "string", "title": "Stampede home", "description": "Stampede state directory (default ~/.stampede)", "required": false }
+  }
+}
