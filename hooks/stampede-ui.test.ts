@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing';
-import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst } from './stampede-ui';
+import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst, delegates } from './stampede-ui';
 
 // A click: the desktop draws clickable rows (a Client) where the terminal draws Buttons.
 const click = (ui: any, surface: string, key: string, row: string) => surface === 'desktop' ? ui.pointer({ type: 'up', x: 1, y: 0, button: 'left', in: row }) : ui.press({ key });
@@ -484,4 +484,10 @@ test('an idle poll writes nothing, so an open pane is not redrawn', async ($, on
   const settled = writes;
   for (let i = 0; i < 5; i++) await clock.advance(1000);
   expect(writes).toBe(settled);
+});
+
+test('agent-comms rules join only prompts that can delegate', async () => {
+  expect(delegates(['Read', 'Agent'])).toBe(true);
+  expect(delegates(['mcp__plugin_stampede_stampede__workflow_run'])).toBe(true);
+  expect(delegates(['Read', 'mcp__stampede__send_message'])).toBe(false);
 });

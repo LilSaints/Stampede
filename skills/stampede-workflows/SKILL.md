@@ -21,6 +21,8 @@ return results;
 
 No imports, other exports, filesystem, process, fetch or timers. Top-level `await` and `return` are supported. Pass dates, random IDs and other changing inputs via `args`; `Date.now()`, argless `Date` and `Math.random()` throw. `log(text)` and `phase(title)` publish progress. Budgets belong to this run: `budget.total`, `budget.spent()`, `budget.remaining()` count output plus Codex reasoning tokens.
 
+The hub prepends a compact `task/scope/known/constraints/done/reply` contract, including the truthful-reporting and `blocked:` rules, to every worker. Write the task prompt the same way: name the exact files, facts already known and what done looks like; do not repeat the contract.
+
 `agent(prompt, opts)` returns final text, or validated data when `schema` is supplied. Options include `backend`, `name`, `label`, `phase`, `role`, `model`, `effort`, `agentType`, `appendSystemPrompt`, `cwd`, `timeoutMs`, `cacheInputs`, `cache:'never'`, `access`, `isolation`, and `comms`. Names must be unique lowercase letters, digits or hyphens, at most 40 characters. Default access is read-only in a shared workspace; editing uses a Git worktree. `full` requires the user's configuration to enable it. Worktree edits remain on the returned Stampede branch; inspect and integrate them separately.
 
 Use an object JSON Schema with named properties. Codex normalization supports optional non-nullable properties through null sentinels; optional properties that themselves permit null and open dictionaries are rejected before launch. Use required nullable properties or arrays of `{key,value}` instead. Original constraints are validated after decoding. Non-comms failures resolve to null; invalid options or exhausted budgets throw.

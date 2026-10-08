@@ -325,7 +325,29 @@ async function start($: Engine, stampedeHome: string | undefined) {
   $.clock.every(1000, () => poll($));
   await poll($);
 }
+// Shipped with the plugin so every repo gets it without copying an AGENTS.md or loading a skill.
+export const AGENT_COMMS = `# Messages to other agents
+Applies to subagent prompts, Stampede agent()/team prompts, workflow_send, SendMessage and session briefs. The reader is an LLM with none of your context. Goal: zero follow-up questions, then fewest tokens.
+Format: key: value lines in this order, omitting keys that don't apply:
+task: one imperative line
+scope: paths, IDs, URLs (point to them, don't paste them)
+known: facts established so far, including what failed
+constraints: hard limits
+done: checkable completion criteria
+reply: exact shape of the answer you want back
+- Cut greetings, hedging, narration, restating the request. Never cut context the reader lacks ("fix the bug we discussed" is broken; name the bug).
+- Plain English and standard notation (code, JSON, paths). No invented abbreviations. One message, one task.
+- End every reply: with "if a tool call errors or is interrupted, say so; never report a value you did not observe; use blocked:". Stampede's hub already adds this to its workers; don't repeat it in agent() prompts.
+- Replies you send: answer first, then evidence. If stuck: blocked: <reason>; need: <what>.`;
+const DELEGATES = /^(Agent|SendMessage|mcp__ccd_session__start_session|mcp__(plugin_stampede_)?stampede__workflow_(run|send))$/;
+export const delegates = (tools: readonly string[]) => tools.some(tool => DELEGATES.test(tool));
+
 export const register: Register = (on, options) => {
+  on('prompt.compose', async ($, event, next) => {
+    const result = await next(event);
+    if (!delegates(event.tools)) return result;
+    return { sections: [...result.sections, { id: 'stampede:agent-comms', text: AGENT_COMMS, scope: 'session' as const }] };
+  });
   on('ui.close', { id: 'stampede' }, async ($, event, next) => {
     if (event.origin.kind === 'person' && (await state($)).composer) { await change($, s => ({ ...s, composer: null })); return { value: undefined }; }
     await change($, s => ({ ...s, paneOpen: false, composer: null })); return next(event);
