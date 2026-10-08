@@ -6,6 +6,13 @@
     "name": "Marco Santini"
   },
   "types": "./types/index.d.ts",
+  "mcpServers": {
+    "stampede": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/cli.js", "mcp", "--role", "orchestrator"],
+      "env": { "STAMPEDE_PLUGIN_HOME": "${user_config.stampedeHome}" }
+    }
+  },
   "userConfig": {
     "stampedeHome": {
       "type": "string",

@@ -4,6 +4,9 @@ A local Claude Code plugin for JavaScript workflows over Claude Code and Codex w
 
 Release candidate `1.0.0-rc.1` is under qualification. See [V1_STATUS.md](V1_STATUS.md) for remaining release gates and [SPEC.md](SPEC.md) for the contract. Live steering and preemption are outside V1.
 
+The [V1 acceptance audit](V1_ACCEPTANCE.md) maps the requirements to automated,
+real-backend and terminal evidence. Live desktop acceptance remains pending.
+
 ## Development installation
 
 Requires Node 22+, Git, Claude Code 2.1.292+ and/or Codex 0.159.2+, with the CLI already signed in. The qualified Windows configuration uses Codex's elevated sandbox. Stampede never copies CLI credentials.
@@ -20,6 +23,10 @@ claude plugin install stampede@stampede --scope user
 The build produces self-contained CLI, workflow-worker and hook bundles plus the Windows helper; an installed plugin does not need development dependencies. Version coupling is checked during the build.
 
 Use `/reload-plugins` in an existing Claude session. For development, use `claude --plugin-dir C:\Dev\Stampede`. The plugin auto-starts the hub when its MCP server connects. `init` previews the Codex defaults it reads from the user's config and asks before writing Stampede's config. State defaults to `~/.stampede`; set `STAMPEDE_HOME` consistently for the CLI and plugin to use another directory.
+
+The MCP server is declared inside the plugin manifest. Do not register it again
+as a project server: `${CLAUDE_PLUGIN_ROOT}` and `${user_config.stampedeHome}`
+are resolved by the plugin loader.
 
 Ask Claude to use Stampede and read the bundled `stampede-workflows` skill. Open `/stampede` for run tabs, messages and controls. With the mod disabled, use `workflow_wait` and `workflow_result` through MCP.
 

@@ -10,7 +10,7 @@ import { defaults } from '../../src/hub/config.js';
 import { capture, type BackendInfo } from '../../src/hub/capabilities.js';
 import { atomicJson, readJson, readJournal } from '../../src/hub/store.js';
 const meta = 'export const meta = { name: "fixture", description: "integration" };\n';
-test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 60000 }, async () => {
+test('authenticated hub runs concurrent scripts, resumes from cache, and persists terminal results', { timeout: 90000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-hub-'));
   const home = path.join(root, 'state'), cwd = path.join(root, 'work'); await mkdir(cwd);
   const config = defaults(); config.defaultBackend = 'codex'; config.scheduler.maxConcurrent = 6; config.scheduler.perRun = 6; config.scheduler.codex.maxConcurrent = 3;
@@ -18,29 +18,46 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
   const hub = await startHub({ home, config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: { available: false, error: 'fixture disabled', capabilities: {} }, codex: fake } });
   const base = `http://127.0.0.1:${hub.port}`;
   const call = async (name: string, input: unknown) => { const response = await fetch(base + '/v1/orch/' + name, { method: 'POST', headers: { authorization: `Bearer ${hub.token}`, 'content-type': 'application/json' }, body: JSON.stringify(input) }); const result: any = await response.json(); assert.equal(response.status, 200, JSON.stringify(result)); return result; };
+  // A long-poll timeout is not completion, especially with concurrent process tests.
+  const waitRun = async (input: Record<string, unknown>) => {
+    const deadline = Date.now() + 20000;
+    let observed;
+    do {
+      observed = await call('workflow_wait', { ...input, wakeOnMessage: false });
+      if (observed.woke !== 'timeout') break;
+    } while (Date.now() < deadline);
+    assert.ok(['completed', 'failed', 'cancelled', 'interrupted'].includes(observed.status), JSON.stringify(observed));
+    return observed;
+  };
   try {
     assert.equal((await fetch(base + '/v1/ui/snapshot')).status, 401);
     const started = await call('workflow_run', { cwd, script: meta + 'return await parallel([() => agent("one"), () => agent("two")]);', orchestratorSessionId: 'owner' });
-    await call('workflow_wait', { runId: started.runId, timeoutSec: 10, orchestratorSessionId: 'observer' });
+    await waitRun({ runId: started.runId, timeoutSec: 10, orchestratorSessionId: 'observer' });
     const result = await call('workflow_result', { runId: started.runId });
     assert.equal(result.status, 'completed', JSON.stringify(result)); assert.deepEqual(result.result, ['one', 'two']);
     assert.equal(hub.manager.get(started.runId).seenSeq.owner, undefined);
     assert.ok(hub.manager.get(started.runId).seenSeq.observer > 0);
+    // A wake the UI delivered is recorded per session, only ever forward.
+    const seen = (session: string, hubSeq: number) => fetch(base + '/v1/ui/seen', { method: 'POST', headers: { authorization: `Bearer ${hub.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ session, seen: [{ runId: started.runId, hubSeq }] }) });
+    assert.equal((await seen('owner', 2)).status, 200);
+    assert.equal(hub.manager.get(started.runId).seenSeq.owner, 2);
+    await seen('owner', 1); await seen('owner', Number.MAX_SAFE_INTEGER);
+    assert.equal(hub.manager.get(started.runId).seenSeq.owner, 2);
     const resumed = await call('workflow_resume', { runId: started.runId });
-    await call('workflow_wait', { runId: resumed.runId, timeoutSec: 10 });
+    await waitRun({ runId: resumed.runId, timeoutSec: 10 });
     assert.deepEqual((await call('workflow_result', { runId: resumed.runId })).result, ['one', 'two']);
     assert.equal(hub.manager.get(resumed.runId).cacheHits, 2);
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
     const teamScript = meta + 'const team = await spawnTeam([{name:"a",prompt:"fixture:team-a"},{name:"b",prompt:"fixture:team-b"}]); await team.untilDone(undefined, {maxMs:10000}); return {results:await team.results(),board:await board()};';
     const teamRun = await call('workflow_run', { cwd, script: teamScript });
-    await call('workflow_wait', { runId: teamRun.runId, timeoutSec: 10, wakeOnMessage: false });
+    await waitRun({ runId: teamRun.runId, timeoutSec: 10, wakeOnMessage: false });
     const teamResult = await call('workflow_result', { runId: teamRun.runId });
     assert.equal(teamResult.status, 'completed', JSON.stringify(teamResult));
     assert.equal(teamResult.result.board.length, 2);
     const sharedJournal = await readJournal<any>(path.join(home, 'runs', teamRun.runId, 'journal.jsonl'));
     assert.ok(sharedJournal.every(record => record.shared.writes.includes('post_finding') && record.shared.writes.includes('send_message')));
     const replayed = await call('workflow_resume', { runId: teamRun.runId });
-    await call('workflow_wait', { runId: replayed.runId, timeoutSec: 10, wakeOnMessage: false });
+    await waitRun({ runId: replayed.runId, timeoutSec: 10, wakeOnMessage: false });
     const replayResult = await call('workflow_result', { runId: replayed.runId });
     assert.deepEqual(replayResult.result.results, teamResult.result.results);
     assert.equal(hub.manager.get(replayed.runId).cacheHits, 2);
@@ -48,11 +65,11 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     assert.equal(replayResult.result.board.length, 2);
     assert.ok(replayResult.result.board.every((entry: any) => entry.replayedFrom === teamRun.runId));
     const changedArgs = await call('workflow_resume', { runId: teamRun.runId, args: { changed: true } });
-    await call('workflow_wait', { runId: changedArgs.runId, timeoutSec: 10, wakeOnMessage: false });
+    await waitRun({ runId: changedArgs.runId, timeoutSec: 10, wakeOnMessage: false });
     assert.equal(hub.manager.get(changedArgs.runId).cacheHits, 0);
     assert.equal(hub.manager.get(changedArgs.runId).liveCalls, 2);
     const drain = await call('workflow_run', { cwd, script: meta + 'const t=await spawnTeam([{name:"late",prompt:"fixture:team-delayed"}]); while(!(await t.messages()).length) await t.untilDone(undefined,{maxMs:50}); const observed=await t.untilDone(undefined,{maxMs:100}); return {observed,results:await t.results()};' });
-    await call('workflow_wait', { runId: drain.runId, timeoutSec: 5, wakeOnMessage: false });
+    await waitRun({ runId: drain.runId, timeoutSec: 5, wakeOnMessage: false });
     const drained = await call('workflow_result', { runId: drain.runId });
     assert.equal(drained.result.observed.reason, 'max-ms');
     assert.equal(drained.result.results.late.result, null);
@@ -60,21 +77,21 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     assert.equal(hub.manager.get(drain.runId).agents[0].result, 'fixture:team-delayed');
     config.scheduler.admissionMaxMs = 150;
     const blocked = await call('workflow_run', { cwd, script: meta + 'const first=await spawnTeam([{name:"a",prompt:"idle"},{name:"b",prompt:"idle"}]); await first.untilQuiet({idleMs:0,maxMs:2000}); const second=await spawnTeam([{name:"c",prompt:"idle"},{name:"d",prompt:"idle"}]); const observed=await second.untilQuiet({idleMs:0,maxMs:2000}); await first.stop(); return observed;' });
-    await call('workflow_wait', { runId: blocked.runId, timeoutSec: 5, wakeOnMessage: false });
+    await waitRun({ runId: blocked.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal((await call('workflow_result', { runId: blocked.runId })).result.reason, 'admission-timeout');
     assert.equal(hub.manager.get(blocked.runId).agents.find(a => a.name === 'c')?.error?.waitedMs, 150);
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
     config.scheduler.admissionMaxMs = 2500;
     const released = await call('workflow_run', { cwd, script: meta + 'const first=await spawnTeam([{name:"a",prompt:"idle"},{name:"b",prompt:"idle"}],{releaseIdleAfterMs:10}); await first.untilQuiet({idleMs:0,maxMs:2000}); const second=await spawnTeam([{name:"c",prompt:"idle"},{name:"d",prompt:"idle"}],{releaseIdleAfterMs:10}); return await second.untilDone(undefined,{maxMs:4000});' });
-    await call('workflow_wait', { runId: released.runId, timeoutSec: 6, wakeOnMessage: false });
+    await waitRun({ runId: released.runId, timeoutSec: 6, wakeOnMessage: false });
     assert.equal((await call('workflow_result', { runId: released.runId })).result.reason, 'all-terminal');
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
     const timed = await call('workflow_run', { cwd, script: meta + 'return await agent("hang",{timeoutMs:150});' });
-    await call('workflow_wait', { runId: timed.runId, timeoutSec: 5, wakeOnMessage: false });
+    await waitRun({ runId: timed.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal(hub.manager.get(timed.runId).agents[0].error?.kind, 'timeout');
     assert.equal((await call('workflow_result', { runId: timed.runId })).result, null);
     const budget = await call('workflow_run', { cwd, budgetTokens: 4, script: meta + 'await agent("first"); return await agent("must not start");' });
-    await call('workflow_wait', { runId: budget.runId, timeoutSec: 5, wakeOnMessage: false });
+    await waitRun({ runId: budget.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal(hub.manager.get(budget.runId).status, 'failed');
     assert.equal(hub.manager.get(budget.runId).agents.length, 1);
     assert.match(hub.manager.get(budget.runId).error!.message, /budget exhausted/);
@@ -96,7 +113,7 @@ test('authenticated hub runs concurrent scripts, resumes from cache, and persist
     await call('workflow_control', { runId: limited.runId, action: 'cancel' });
     config.scheduler.codex.maxConcurrent = 1;
     const auth = await call('workflow_run', { cwd, script: meta + 'return await parallel([()=>agent("auth"),()=>agent("auth"),()=>agent("auth"),()=>agent("auth")]);' });
-    await call('workflow_wait', { runId: auth.runId, timeoutSec: 5, wakeOnMessage: false });
+    await waitRun({ runId: auth.runId, timeoutSec: 5, wakeOnMessage: false });
     assert.equal(hub.manager.get(auth.runId).liveCalls, 1);
     assert.ok(hub.manager.get(auth.runId).agents.every(a => a.error?.kind === 'auth'));
     assert.equal(hub.manager.get(auth.runId).notifications?.filter(e => e.type === 'backend.unavailable').length, 1);

@@ -19,8 +19,8 @@ const truncate = (value: string, max: number) => value.length > max ? value.slic
 export function summary(run: Run, session?: string) {
   return { runId: run.id, name: run.name, status: run.status, startedAt: run.startedAt, endedAt: run.endedAt, orchestratorSessionId: run.orchestratorSessionId,
     phases: run.phases.map(p => ({ ...p, counts: Object.fromEntries(['queued', 'running', 'waiting', 'idle', 'done', 'failed'].map(s => [s, run.agents.filter(a => a.phase === p.title && a.status === s).length])) })),
-    agents: run.agents.map(a => ({ name: a.name, backend: a.backend, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + (a.backend === 'codex' ? a.usage.reasoningTokens : 0), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
-    budget: { spent: run.budget.spentTokens, total: run.budget.totalTokens }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
+    agents: run.agents.map(a => ({ name: a.name, label: a.label, backend: a.backend, model: a.model, context: a.context, startedAt: a.turns[0]?.startedAt, endedAt: ['done', 'failed', 'cancelled', 'skipped'].includes(a.status) ? a.turns.at(-1)?.endedAt : undefined, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + (a.backend === 'codex' ? a.usage.reasoningTokens : 0), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
+    budget: { spent: run.budget.spentTokens, total: run.budget.totalTokens, spentUsd: run.budget.spentUsd, billedUsd: run.agents.reduce((sum, a) => sum + (a.billing === 'api' ? a.usage.usd ?? 0 : 0), 0) }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
     resultPath: path.join(path.dirname(run.scriptPath), 'result.json'), error: run.error, notifications: run.notifications ?? [] };
 }
 export async function startHub(options: { home: string; config: Config; cliEntry: string; backends?: Record<'claude' | 'codex', BackendInfo>; security?: Security }) {
@@ -197,6 +197,18 @@ export async function startHub(options: { home: string; config: Config; cliEntry
         const events = manager.events.filter(e => e.hubSeq > since);
         const selected = events.slice(0, max);
         result = { hubSeq: selected.at(-1)?.hubSeq ?? manager.hubSeq, events: selected, truncated: events.length > max || since < (manager.events[0]?.hubSeq ?? manager.hubSeq + 1) - 1 };
+      } else if (request.method === 'POST' && url.pathname === '/v1/ui/seen') {
+        // The UI delivered these updates to the session as a wake. Record each
+        // as seen up to its own sequence, never past the hub's, so a restarted
+        // session is not woken for them again and a later update still is.
+        const input = await body(request);
+        if (typeof input.session !== 'string' || !input.session || input.session.length > 200 || !Array.isArray(input.seen)) throw new Error('session and seen required');
+        for (const item of input.seen.slice(0, 100)) {
+          const run = typeof item?.runId === 'string' ? manager.runs.get(item.runId) : undefined;
+          if (!run || !Number.isInteger(item.hubSeq) || item.hubSeq > manager.hubSeq || item.hubSeq <= (run.seenSeq[input.session] ?? 0)) continue;
+          run.seenSeq[input.session] = item.hubSeq; await store.write(path.join(store.runDir(run.id), 'run.json'), run);
+        }
+        result = { ok: true };
       } else throw Object.assign(new Error('route not found'), { statusCode: 404 });
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); response.end(JSON.stringify(result ?? {}));
     } catch (error) { if (!response.headersSent) response.writeHead((error as any).statusCode ?? 400, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: (error as Error).message, code: (error as any).code ?? 'request_failed' })); }

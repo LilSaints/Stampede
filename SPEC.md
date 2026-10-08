@@ -1169,7 +1169,7 @@ Stampede/
                                      "types":"./types/index.d.ts",
                                      "userConfig":{"stampedeHome":{"type":"string","description":"Stampede state dir (default ~/.stampede)","required":false}}}
   .claude-plugin/marketplace.json   single entry: plugin "stampede", source "./"
-  .mcp.json                         {"mcpServers":{"stampede":{"command":"node",
+  plugin.json mcpServers (inline)   {"mcpServers":{"stampede":{"command":"node",
                                      "args":["${CLAUDE_PLUGIN_ROOT}/dist/cli.js","mcp","--role","orchestrator"]}}}
   hooks/hooks.json                  {"modules":["./stampede-ui.tsx"]}
   hooks/stampede-ui.tsx             the mod (§20)
@@ -1233,7 +1233,7 @@ Stampede/
   SPEC.md
   package.json  tsconfig.json
   .claude-plugin/plugin.json  .claude-plugin/marketplace.json
-  .mcp.json
+  # MCP server is inline in .claude-plugin/plugin.json
   hooks/hooks.json  hooks/stampede-ui.tsx  hooks/stampede-ui.test.ts
   types/index.d.ts
   skills/stampede-workflows/SKILL.md

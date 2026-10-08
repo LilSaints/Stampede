@@ -16,6 +16,10 @@ export interface Agent {
   status: AgentStatus; sessionId?: string; markedDone: boolean; result?: unknown; resultStoredAtTurn?: number; teamId?: string;
   usage: Usage; resumes: number; stopBlocks: number; lastActivityAt: string; error?: { kind: string; message: string; blockedBy?: string[]; waitedMs?: number };
   externalTools?: string[];
+  /** The resolved model and its latest request's size, for the UI. */
+  model?: string; context?: { tokens: number; window?: number };
+  /** How the worker pays: an API key's spend is real; a subscription's USD is only an estimate. */
+  billing?: 'api' | 'subscription';
   turns: { n: number; kind: string; startedAt: string; endedAt?: string; outcome?: TurnOutcome; stdoutPath: string; stderrPath: string }[];
 }
 export interface Run {

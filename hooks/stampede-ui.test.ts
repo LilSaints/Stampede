@@ -1,18 +1,92 @@
 import { test, expect, mock } from 'claude-code/testing';
-import { initialState, reduce, wakePrompt, shouldWake, bandText, runHeading } from './stampede-ui';
+import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst } from './stampede-ui';
 
+// A click: the desktop draws clickable rows (a Client) where the terminal draws Buttons.
+const click = (ui: any, surface: string, key: string, row: string) => surface === 'desktop' ? ui.pointer({ type: 'up', x: 1, y: 0, button: 'left', in: row }) : ui.press({ key });
 const run = (id = 'owned', session = 'owner') => ({ runId: id, name: id, orchestratorSessionId: session, status: 'running', seenSeq: 0, agents: [], phases: [], budget: { spent: 42 }, resultPath: 'C:/state/result.json', messages: [], log: [] });
-test('band counts owned work and keeps completed-run unread messages visible', async () => {
-  const owned: any = { ...run(), unreadForOrchestrator: 2, agents: [{ status: 'running' }, { status: 'waiting' }] };
-  const state = { ...initialState(), ownedRunIds: ['owned'], runs: { owned, other: { ...run('other', 'someone'), unreadForOrchestrator: 99 } } };
-  expect(bandText(state)).toBe('Stampede ● 1 runs · 1 running · 1 waiting · 2 msg for Claude · 42 tok');
-  owned.status = 'completed';
-  expect(bandText(state)).toBe('Stampede ● 0 runs · 0 running · 0 waiting · 2 msg for Claude · 0 tok');
-  owned.unreadForOrchestrator = 0; expect(bandText(state)).toBe(undefined);
-  expect(runHeading({ ...run(), startedAt: '2026-10-08T00:00:00Z', budget: { spent: 42, total: 500 } }, Date.parse('2026-10-08T00:02:00Z'))).toBe('owned · owned · running · 2:00 · 42 / 500 tokens');
+for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row per live run of this session on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-08T00:02:00Z') });
+  const owned: any = { ...run(), name: 'review', startedAt: '2026-10-08T00:00:00Z', agents: [{ status: 'done' }, { status: 'running', lastActivity: '2026-10-08T00:01:59Z' }] };
+  let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['owned'], runs: { owned, other: run('other', 'someone') } }, version = 1;
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('ui.open', () => ({ value: { isPlaced: true } }));
+  const closed: string[] = [];
+  on('ui.close', (_$, event) => { closed.push(event.id); return { value: undefined }; });
+  // The engine's own band when the hook has nothing to draw.
+  on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as any);
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'AbovePrompt', props: { bodyColumns: 100 } as any });
+  const drawn = JSON.stringify(await ui.drawn());
+  for (const text of ['review', '1/2 agents · 2m 0s', 'View']) expect(drawn.includes(text)).toBe(true);
+  expect(drawn.includes('other')).toBe(false);
+  await ui.press({ key: 'open' });
+  expect(state.paneOpen).toBe(true);
+  // The band stays while the pane is open, its button now hiding the pane.
+  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('Hide')).toBe(true);
+  await ui.press({ key: 'open' });
+  expect(closed).toEqual(['stampede']); expect(state.paneOpen).toBe(false);
+  // A finished run keeps a row to reopen the pane from, until dismissed.
+  state = { ...state, runs: { ...state.runs, owned: { ...owned, status: 'completed', endedAt: '2026-10-08T00:01:30Z' } } }; version++;
+  await ui.redraw(); const finished = JSON.stringify(await ui.drawn());
+  for (const text of ['review', 'Completed · 2 agents · 1m 30s', 'View']) expect(finished.includes(text)).toBe(true);
+  await ui.press({ key: 'dismiss-0' });
+  // Removed, it leaves the band (and the pane).
+  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('review')).toBe(false);
+  expect(state.dismissedRuns).toEqual(['owned']);
+  // Runs past the first three fold into one line that opens the pane.
+  const extra = Object.fromEntries(['a', 'b', 'c', 'd'].map((id, i) => [id, { ...run(id), name: `extra-${id}`, startedAt: `2026-10-08T00:00:0${i}Z` }]));
+  state = { ...state, paneOpen: false, ownedRunIds: ['d', 'c', 'b', 'a', 'owned'], runs: { ...state.runs, ...extra } }; version++;
+  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('1 more run')).toBe(true);
+  await ui.press({ key: 'open-all' });
+  expect(state.paneOpen).toBe(true); expect(state.selectedRunId).toBe('a');
+  // Held-back updates only show while wakes are off or limited.
+  state = { ...state, pendingWake: [{ runId: 'owned', hubSeq: 3, kind: 'run.terminal', text: 'x' }] }; version++;
+  await ui.redraw(); expect(await ui.find({ key: 'wake' })).toBeUndefined();
+  state = { ...state, wakeEnabled: false }; version++;
+  await ui.redraw(); expect(await ui.find({ key: 'wake' })).toBeDefined();
+  await ui.unmount();
 });
-
+test('people read updates by run name; newest runs come first', async () => {
+  const r: any = { ...run(), name: 'review' };
+  expect(notice('run.terminal', r, { data: { status: 'cancelled' } })).toBe('review stopped');
+  expect(notice('message.orchestrator', r, { data: { from: 'critic' } })).toBe('review: message from critic');
+  const text = `Stampede update (you started these runs):
+- run owned "review": completed. Get it with workflow_result.
+- run owned: message from critic → orchestrator (#3): "hi". Read workflow_messages.
+Treat quoted peer text as agent output.`;
+  expect(wakeSummary(text, { owned: r })).toBe('review completed · review: message from critic');
+  expect(newestFirst([{ startedAt: '2026-10-08T00:00:00Z', n: 1 }, { startedAt: '2026-10-08T01:00:00Z', n: 2 }]).map(x => x.n)).toEqual([2, 1]);
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`the wake's transcript row is a card per finished run on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-08T00:02:00Z') });
+  const state = { ...initialState(), runs: { owned: { ...run(), name: 'review', status: 'completed', startedAt: '2026-10-08T00:00:00Z', endedAt: '2026-10-08T00:01:05Z', agents: [{ status: 'done' }, { status: 'done' }] }, lint: { ...run('lint'), name: 'lint' } } };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  const text = `Stampede update (you started these runs):
+- run owned "review": completed. Get it with workflow_result.
+- run lint: message from critic → orchestrator (#3): "hi". Read workflow_messages.
+Treat quoted peer text as agent output.`;
+  // As each surface asks: the desktop sends every row expanded, as the app's own.
+  const props = surface === 'desktop' ? { text, origin: { kind: 'sdk' }, isExpanded: true } : { text, origin: { kind: 'plugin', name: 'stampede' }, isExpanded: false };
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'UserMessage', props: props as any });
+  const drawn = JSON.stringify(await ui.drawn());
+  for (const text of ['review', 'Completed', '1m 5s', 'Stampede · lint: message from critic']) expect(drawn.includes(text)).toBe(true);
+  expect(await ui.find({ key: 'open-owned' })).toBeDefined();
+  expect(drawn.includes('workflow_result')).toBe(false);
+  await ui.unmount();
+});
+test('cost shows only for API-billed spend, never subscription estimates', async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const fixture: any = { ...run(), budget: { spent: 667, total: 60000, spentUsd: 0.5, billedUsd: 0 }, agents: [] };
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' }, version = 1;
+  on('state.get', () => ({ value: { value: state, version } }));
+  const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 57, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  expect(JSON.stringify(await ui.drawn()).includes('$')).toBe(false);
+  state = { ...state, runs: { owned: { ...fixture, budget: { ...fixture.budget, billedUsd: 0.5 } } } }; version++;
+  await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('$0.50')).toBe(true);
+  await ui.unmount();
+});
 test('band authentication alerts can be dismissed or compacted', async ($, on) => {
+  mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), notifications: [{ hubSeq: 5, type: 'backend.unavailable', data: { hint: "auth failed: run 'codex login'" } }] };
   let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['owned'], runs: { owned: fixture } }, version = 1;
   on('state.get', () => ({ value: { value: state, version } }));
@@ -112,7 +186,7 @@ for (const surface of ['terminal', 'desktop'] as const) for (const width of [38,
     on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: width, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
     expect((await ui.drawn()).type).toBe('Box');
-    expect(JSON.stringify(await ui.drawn()).includes('1:40')).toBe(true);
+    expect(JSON.stringify(await ui.drawn()).includes('1m 40s')).toBe(true);
     expect(await ui.find({ key: 'cancel' })).toBeDefined();
     expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
     expect(await ui.find({ key: 'retry-worker' })).toBeDefined();
@@ -173,7 +247,8 @@ test('the polling loop waits for idle and submits a single owned wake', async ($
   on('ui.status', () => ({ value: undefined }));
   on('ui.toast', () => ({ value: undefined }));
   on('fs.read', (_$, event) => ({ value: event.path.endsWith('hub.json') ? '{"port":1234}' : 'synthetic-token' }));
-  on('http.fetch', (_$, event) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(event.url.includes('/events') ? { hubSeq: 1, events: [{ runId: 'owned', hubSeq: 1, type: 'run.status', data: { status: 'completed' } }] } : { hubSeq: 1, uiApiVersion: 1, runs: [{ ...run(), status: 'completed' }] }) } }));
+  const seen: any[] = [];
+  on('http.fetch', (_$, event) => (event.url.endsWith('/v1/ui/seen') && seen.push(JSON.parse(event.init!.body!)), { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(event.url.includes('/events') ? { hubSeq: 1, events: [{ runId: 'owned', hubSeq: 1, type: 'run.status', data: { status: 'completed' } }] } : { hubSeq: 1, uiApiVersion: 1, runs: [{ ...run(), status: 'completed' }] }) } }));
   on('prompt.submit', (_$, event) => { submitted.push(event.text); return { text: event.text, origin: event.origin }; });
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'C:/fixture' });
   expect(state.pendingWake.length).toBe(1);
@@ -184,6 +259,8 @@ test('the polling loop waits for idle and submits a single owned wake', async ($
   await clock.advance(1000);
   expect(submitted.length).toBe(1);
   expect(state.pendingWake.length).toBe(0);
+  // The delivery is recorded at the hub, so a restarted session is not woken for it again.
+  expect(seen).toEqual([{ session: 'owner', seen: [{ runId: 'owned', hubSeq: 1 }] }]);
   await clock.advance(10000);
   expect(submitted.length).toBe(1);
 });
@@ -231,4 +308,180 @@ for (const surface of ['terminal', 'desktop'] as const) test(`pane actions route
   await ui.press({ key: 'confirm' });
   expect(posts.at(-1)?.body.action).toBe('cancel');
   await ui.unmount();
+});
+test('agent cells follow the Workflow states and scale past the limit', async () => {
+  const now = Date.parse('2026-10-08T00:10:00Z');
+  expect(cellState({ status: 'running', lastActivity: '2026-10-08T00:09:59Z' }, now)).toBe('running');
+  expect(cellState({ status: 'running', lastActivity: '2026-10-08T00:05:00Z' }, now)).toBe('stalled');
+  expect(cellState({ status: 'waiting', lastActivity: '2026-10-08T00:05:00Z' }, now)).toBe('running');
+  expect(cellState({ status: 'queued' }, now)).toBe('pending');
+  expect(cellState({ status: 'cancelled' }, now)).toBe('error');
+  const many = [...Array(900).fill({ status: 'done' }), ...Array(99).fill({ status: 'queued' }), { status: 'failed' }];
+  const scaled = cells(many, now, 64);
+  expect(scaled.length).toBe(64);
+  expect(scaled.filter(s => s === 'error').length).toBe(1);
+  expect(scaled[0]).toBe('done');
+  const svg = gridSvg(scaled, 16);
+  expect(svg.width).toBe(16 * 8 - 2);
+  if (svg.source.includes('"') || svg.source.length > 2000) throw new Error('grid source is escaped or too large');
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`workflow_run chat row is a live card that opens the pane on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-08T00:01:05Z') });
+  const live: any = { ...run(), name: 'review', startedAt: '2026-10-08T00:00:00Z', agents: [{ name: 'a', status: 'done' }, { name: 'b', status: 'running', lastActivity: '2026-10-08T00:01:00Z' }] };
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: live }, ownedRunIds: ['owned'], selectedRunId: null as string | null }, version = 1;
+  const opened: string[] = [];
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('ui.open', (_$, event) => { opened.push(event.id); return { value: { isPlaced: true } }; });
+  const props = { tool_use_id: 't1', tool: 'mcp__plugin_stampede_stampede__workflow_run', input: { name: 'review' }, isRunning: false, isErrored: false, isInterrupted: false, output: [{ type: 'text', text: '{"runId":"owned","status":"running"}' }] };
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'ToolUse', requestId: 't1', props: props as any });
+  const drawn = JSON.stringify(await ui.drawn());
+  expect(drawn.includes('review')).toBe(true);
+  expect(drawn.includes('1m 5s')).toBe(true);
+  await click(ui, surface, 'open-owned', 'open-owned');
+  expect(state.selectedRunId).toBe('owned');
+  expect(opened).toEqual(['stampede']);
+  state = { ...state, runs: { owned: { ...state.runs.owned, status: 'failed' } } }; version++; await ui.redraw();
+  const done = JSON.stringify(await ui.drawn());
+  expect(done.includes('Ran workflow')).toBe(true);
+  expect(done.includes('Failed')).toBe(true);
+  await ui.unmount();
+  const result = await $.ui.mount({ plugin: 'stampede', surface, component: 'ToolResult', requestId: 't1', props: { tool_use_id: 't1', tool: props.tool, output: props.output, isErrored: false } as any });
+  expect(JSON.stringify(await result.drawn()).includes('runId')).toBe(false);
+  await result.unmount();
+});
+test('phases open while the run is active and toggle closed', async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const fixture: any = { ...run(), phases: [{ title: 'Survey' }, { title: 'Summarize' }], agents: [{ name: 'worker', backend: 'claude', status: 'running', phase: 'Survey', tokens: 1 }] };
+  let state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' }, version = 1;
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
+  expect(JSON.stringify(await ui.drawn()).includes('No agents have started yet')).toBe(true);
+  await click(ui, 'desktop', 'phase-0', 'phase-row-0'); await ui.redraw();
+  expect(await ui.find({ key: 'skip-worker' })).toBeUndefined();
+  expect(state.expandedPhases?.['owned:Survey']).toBe(false);
+  await ui.unmount();
+});
+test('expanded phases list each agent with its model and context size', async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  expect(modelName({ backend: 'claude', model: 'claude-opus-5-5[1m]' })).toBe('opus-5-5');
+  expect(modelName({ backend: 'codex' })).toBe('codex');
+  expect(contextFull({ context: { tokens: 210000, window: 258400 } })).toBe(true);
+  expect(contextFull({ context: { tokens: 16789, window: 258400 } })).toBe(false);
+  const fixture: any = { ...run(), agents: [{ name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', status: 'running', tokens: 1, context: { tokens: 46871, window: 1000000 } }, { name: 'critic', backend: 'codex', status: 'queued', tokens: 0 }] };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+    const drawn = JSON.stringify(await ui.drawn());
+    for (const text of ['Context', 'opus-5-5', '46.9k', 'critic', '—']) expect(drawn.includes(text)).toBe(true);
+    await ui.unmount();
+  }
+});
+test('a desktop that attaches after session start still starts the UI once', async ($, on) => {
+  let state = initialState(), version = 0, fetches = 0, commands = 0;
+  mock.clock(on, { now: 100000 }); mock.store(on); mock.env(on, { STAMPEDE_HOME: 'C:/fixture' });
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('session.surfaces', () => ({ value: [] }));
+  on('session.id', () => ({ value: 'owner' }));
+  on('session.start', () => ({ cwd: 'C:/fixture' }));
+  on('session.attach', (_$, event) => ({ clientId: event.clientId }));
+  on('command.register', () => { commands++; return { value: { command: 'stampede' } }; });
+  on('ui.status', () => ({ value: undefined }));
+  on('fs.read', (_$, event) => ({ value: event.path.endsWith('hub.json') ? '{"port":1234}' : 'synthetic-token' }));
+  on('http.fetch', (_$, event) => { fetches++; return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(event.url.includes('/events') ? { hubSeq: 0, events: [] } : { hubSeq: 0, uiApiVersion: 1, runs: [] }) } }; });
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: 'C:/fixture' } as any);
+  expect(fetches).toBe(0); expect(commands).toBe(0);
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' });
+  expect(commands).toBe(1); expect(fetches).toBe(2);
+  await $.session.attach({ surface: 'mobile', clientId: 'phone' });
+  expect(commands).toBe(1);
+});
+test('a running phase gets the agent rows before a finished one', async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const done = Array.from({ length: 4 }, (_, i) => ({ name: `survey-${i}`, backend: 'claude', status: 'done', phase: 'Survey', tokens: 1 }));
+  const fixture: any = { ...run(), phases: [{ title: 'Survey' }, { title: 'Review' }], agents: [...done, { name: 'critic', backend: 'codex', status: 'running', phase: 'Review', tokens: 1 }] };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned', expandedPhases: { 'owned:Survey': true } };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  const ui = await $.ui.mount({ plugin: 'stampede', surface: 'desktop', component: 'Pane', requestId: 'stampede', props: { bodyColumns: 57, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  expect(await ui.find({ key: 'skip-critic' })).toBeDefined();
+  expect(JSON.stringify(await ui.drawn()).includes('survey-3')).toBe(true);
+  await ui.unmount();
+  expect(statusText({ ...state, runs: { owned: { ...fixture, budget: { spent: 1200 } } } })).toBe('● 1 running · 1.2k tokens');
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`a tool group holding a workflow run unfolds so its card stays on ${surface}`, async ($, on) => {
+  let drawn: any;
+  on('state.get', () => ({ value: { value: initialState(), version: 1 } }));
+  on('ui.render', (_$, event) => { drawn = event.props; return { type: 'Box', props: {}, children: [] } as any; });
+  const run = { tool: 'mcp__plugin_stampede_stampede__workflow_run', input: {}, isRunning: false, isErrored: false, isInterrupted: false, output: '{"runId":"owned"}' };
+  const bash = { tool: 'Bash', input: { command: 'ls' }, isRunning: false, isErrored: false, isInterrupted: false, output: { stdout: '' } };
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'ToolGroup', props: { calls: [run, bash], isActive: false, isExpanded: false } as any });
+  expect(drawn.isExpanded).toBe(true);
+  await ui.unmount();
+  const other = await $.ui.mount({ plugin: 'stampede', surface, component: 'ToolGroup', props: { calls: [bash, bash], isActive: false, isExpanded: false } as any });
+  expect(drawn.isExpanded).toBe(false);
+  await other.unmount();
+});
+test('/stampede toggles the pane', async ($, on) => {
+  let state = { ...initialState(), hub: { ok: true, url: '' } }, version = 1;
+  const calls: string[] = [];
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('ui.open', () => { calls.push('open'); return { value: { isPlaced: true } }; });
+  on('ui.close', () => { calls.push('close'); return { value: undefined }; });
+  await $.command.run({ command: 'stampede', args: '', origin: { kind: 'composer' } } as any);
+  expect(state.paneOpen).toBe(true);
+  await $.command.run({ command: 'stampede', args: '', origin: { kind: 'composer' } } as any);
+  expect(state.paneOpen).toBe(false);
+  expect(calls).toEqual(['open', 'close']);
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`the pane lists running and finished runs as cards that expand on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-08T00:02:00Z') });
+  const at = (id: string, status: string, start: string): any => ({ ...run(id), name: id, status, startedAt: start, ...(status === 'running' ? {} : { endedAt: '2026-10-08T00:01:00Z' }), agents: [{ name: `${id}-agent`, backend: 'claude', status: status === 'running' ? 'running' : 'done', tokens: 1 }] });
+  let state = { ...initialState(), hub: { ok: true, url: '' }, ownedRunIds: ['live', 'done-1', 'done-2'], runs: { live: at('live', 'running', '2026-10-08T00:01:30Z'), 'done-1': at('done-1', 'completed', '2026-10-08T00:00:30Z'), 'done-2': at('done-2', 'failed', '2026-10-08T00:00:00Z') }, selectedRunId: 'live' as string | null }, version = 1;
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 80, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+  const drawn = JSON.stringify(await ui.drawn());
+  for (const text of ['Running', 'Finished 2', 'Workflow', 'Completed', 'Failed', 'Phases']) expect(drawn.includes(text)).toBe(true);
+  expect(await ui.find({ key: 'cancel' })).toBeDefined();
+  // The Finished header collapses and expands its section.
+  await click(ui, surface, 'finished', 'finished-row'); await ui.redraw();
+  expect(state.finishedCollapsed).toBe(true); expect(JSON.stringify(await ui.drawn()).includes('done-1')).toBe(false);
+  await click(ui, surface, 'finished', 'finished-row'); await ui.redraw();
+  expect(state.finishedCollapsed).toBe(false);
+  // Expanding another card closes the first; pressing it again closes all.
+  await click(ui, surface, 'toggle-done-1', 'head-done-1'); await ui.redraw();
+  expect(state.selectedRunId).toBe('done-1'); expect(await ui.find({ key: 'cancel' })).toBeUndefined();
+  await click(ui, surface, 'toggle-done-1', 'head-done-1'); await ui.redraw();
+  expect(state.selectedRunId).toBe(''); expect(JSON.stringify(await ui.drawn()).includes('Phases')).toBe(false);
+  // Finished runs are removed one by one, or all at once.
+  await ui.press({ key: 'remove-done-1' }); await ui.redraw();
+  expect(JSON.stringify(await ui.drawn()).includes('Finished 1')).toBe(true);
+  await click(ui, surface, 'clear-finished', 'clear-finished'); await ui.redraw();
+  const cleared = JSON.stringify(await ui.drawn());
+  expect(cleared.includes('Finished')).toBe(false); expect(cleared.includes('live')).toBe(true);
+  await ui.unmount();
+});
+test('an idle poll writes nothing, so an open pane is not redrawn', async ($, on) => {
+  let state = { ...initialState(), paneOpen: true }, version = 0, writes = 0;
+  const clock = mock.clock(on, { now: 100000 });
+  mock.store(on); mock.env(on, { STAMPEDE_HOME: 'C:/fixture' });
+  on('state.get', () => ({ value: { value: state, version } }));
+  on('state.set', (_$, event) => { writes++; state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
+  on('session.surfaces', () => ({ value: ['desktop'] }));
+  on('session.id', () => ({ value: 'owner' }));
+  on('session.start', () => ({ cwd: 'C:/fixture' }));
+  on('command.register', () => ({ value: { command: 'stampede' } }));
+  on('ui.status', () => ({ value: undefined }));
+  on('fs.read', (_$, event) => ({ value: event.path.endsWith('hub.json') ? '{"port":1234}' : 'synthetic-token' }));
+  const finished = { ...run(), status: 'completed', startedAt: '1970-01-01T00:00:00Z', endedAt: '1970-01-01T00:01:00Z' };
+  on('http.fetch', (_$, event) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(event.url.includes('/events') ? { hubSeq: 5, events: [] } : { hubSeq: 5, uiApiVersion: 1, runs: [finished] }) } }));
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: 'C:/fixture' } as any);
+  const settled = writes;
+  for (let i = 0; i < 5; i++) await clock.advance(1000);
+  expect(writes).toBe(settled);
 });

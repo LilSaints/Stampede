@@ -5,8 +5,8 @@ import { startHub } from '../dist/src/hub/server.js';
 import { defaults } from '../dist/src/hub/config.js';
 
 // Launch Claude with the printed owner as --session-id and this STAMPEDE_HOME.
-// Automatic wakes are disabled by a zero hourly limit. Do not press Wake now:
-// that explicitly submits a model prompt and is outside this free UI fixture.
+// Automatic wakes are disabled by a zero hourly limit. Pressing Wake now
+// submits a real model prompt; use it only for opt-in live wake acceptance.
 const home = path.resolve(process.argv[2]);
 const cwd = path.join(home, 'work'); await mkdir(cwd, { recursive: true });
 const owner = randomUUID(), config = defaults();

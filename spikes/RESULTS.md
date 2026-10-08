@@ -1,6 +1,6 @@
 # Stampede spike results
 
-Measured 2026-10-08, Europe/London. Scope: **S-20–S-23 only**. The other M0 spikes have not been run in this review.
+Measured 2026-10-08, Europe/London. The initial S-20–S-23 review is preserved below; subsequent sections record the broader implementation and release qualification.
 
 Environment: Windows 11, Node 24.20.0, Claude Code 2.1.292, Codex CLI 0.159.2. Model probes used Claude Haiku at low effort and Codex `gpt-6-luna` at low effort; the S-22 resumed turn used medium effort to test the override. Claude calls had a $0.50 per-invocation ceiling.
 
@@ -142,7 +142,7 @@ Diagnostic attempts are retained alongside the final evidence. A completed harne
 | S-13 | Selected dedicated `dist/hook.js`: 30 launches, p95 149.56 ms (startup only, excludes HTTP). The bundled full CLI missed the target under the later workload. Evidence: `artifacts/s13-dedicated-20261008/summary.json`. |
 | S-14 | Actual terminal mod read outside-project state and authenticated to the hub over HTTP; restart reconnection also passed. Evidence: `artifacts/host-probe.json`. Live desktop remains unverified. |
 | S-15 | Actual terminal wake was attributed as “Prompt from the stampede plugin”, produced one follow-up turn and retrieved result 42. Busy submission is suppressed; host `drop` preserves pending updates. Deliberately submitting into a busy real turn was not tested. |
-| S-16 | Actual terminal pane/band/toast/wake observed; worker controls and run tabs pass at 40/100/160 columns. Manual Wake now and actual desktop painting/actions remain pending. Desktop components and action dispatch pass installed-host renderer tests. |
+| S-16 | Actual terminal pane/band/toast/wake observed; worker controls and run tabs pass at 40/100/160 columns. Manual Wake now passes in live terminals at 40/100/160 columns (see final acceptance below); actual desktop painting/actions remain pending. Desktop components and action dispatch pass installed-host renderer tests. |
 | S-17 | Fresh bundles install in a disposable user-scope configuration with no dependencies or copied credentials. MCP connects; generated plugin-disable settings remove its MCP server; packaged workflow returns 42. Evidence: `artifacts/s17-current-24afad0/summary.json`. Strict MCP configuration and worker-role recursion guard remain in place. |
 | S-18 | Actual `mcp__plugin_stampede_stampede__workflow_run` interception stamped the live Claude session ID and selected the resulting run. Both this prefix and standalone `mcp__stampede__` are supported. |
 | S-19 | The actual timer delivered a wake between terminal turns and re-registered after live hot reload, reconnecting to the restarted hub's new port. Evidence: `artifacts/host-probe.json`. CAS overlap guard passes fixtures. |
@@ -242,3 +242,15 @@ The desktop-access audit found a supported path beyond CUA: the bundled Windows 
 The full mixed-process qualification finished successfully: all 1,000 seeded schedules passed, 600 ordered/unique/committed worker deliveries each (600,000 total), plus reserve-progress, deadlock, idle-burst single resume and queued-team stop in each schedule. Process exit code 0; duration 10,664.98 seconds. Evidence: artifacts/mixed-process-1000-20261008.log. This long test used its original frozen b1718ab-era modules/shim; later implementation changes were checked by current-source CI and focused regressions. CI run 37763740426 at e947a7b passes all 48 tests on Windows and 46 applicable tests on Ubuntu. Normal dist can now be rebuilt without changing the completed qualification's runtime.
 
 After the long qualification exited, npm test rebuilt the normal current-source runtime bundles and all 48 core tests passed locally on Windows (55.7 seconds). All 22 installed-host plugin tests and strict plugin validation passed again. No real model calls were made. Remaining live desktop access is waiting for Computer Use app approval; real Claude/Codex acceptance is waiting for explicit model-usage approval. No V1 tag or release has been created.
+
+## Final real-backend and terminal acceptance - 2026-10-08
+
+The previously unexecuted `v1-acceptance.mjs` now passes all four scenarios on signed-in CLIs: exact three-message peer exchange with three Claude hook deliveries, stable-session message resume on each backend, and temporal overlap of all six batch turns. Every peer delivery committed. Evidence: `artifacts/v1-acceptance-final/summary.json`.
+
+`v1-reference.mjs` runs the same shared control-flow/schema fixtures as the fake parity suite. Reference placeholders are instantiated with synthetic facts and explicit low-effort model options; no review-quality claim is made. Review-changes (4 workers), loop-until-dry (12 workers) and judge-panel (7 workers) pass independently on real Claude and Codex: 46 worker calls. Evidence: `artifacts/v1-reference-final/summary.json`.
+
+The actual terminal Wake now button passes at 40, 100 and 160 columns. Each fixture configures zero automatic wakes; one click submits one prompt with transcript origin `{kind:"plugin",name:"stampede"}`, includes the quoted peer message, and receives `received`. Pending wake controls disappear, sessions exit, runs are cancelled and hubs shut down. Evidence: `artifacts/ui-wake-{40,100,160}-final/manual-summary.json`. An initial 80-column probe is retained separately.
+
+Fresh local checks pass: 48 core tests, 22 plugin tests, strict validation, core/mod TypeScript, and isolated installation without node_modules. The full core run initially exposed a long-poll timeout assumption under load; polling now waits for terminal status within a bounded deadline, and the full rerun passes in 62.4 seconds. Fresh packaging connects MCP, verifies worker exclusion and returns 42; evidence: `artifacts/s17-final-current/summary.json`.
+
+Desktop discovery and state inspection now work, but activation failed twice after refreshing window selection. The live desktop checklist remains blocked on bringing Claude's Code tab to the foreground. [V1_ACCEPTANCE.md](../V1_ACCEPTANCE.md) records the requirement audit and remaining release sequence. These results supersede earlier pending real-backend and terminal-wake statements; no stable release or desktop acceptance is claimed.

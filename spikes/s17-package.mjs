@@ -17,7 +17,7 @@ for (const directory of [plugin, config, home, cwd]) await mkdir(directory);
 const result = { at: new Date().toISOString(), fixture, runtimeDirectory };
 let descriptor, token;
 try {
-  for (const file of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', '.mcp.json', 'hooks/hooks.json', 'hooks/stampede-ui.tsx', 'types/index.d.ts', 'skills/stampede-workflows/SKILL.md', 'dist/cli.js', 'dist/worker.js', 'dist/hook.js', 'dist/windows-helper.ps1']) {
+  for (const file of ['.claude-plugin/plugin.json', '.claude-plugin/marketplace.json', 'hooks/hooks.json', 'hooks/stampede-ui.tsx', 'types/index.d.ts', 'skills/stampede-workflows/SKILL.md', 'dist/cli.js', 'dist/worker.js', 'dist/hook.js', 'dist/windows-helper.ps1']) {
     const target = path.join(plugin, file); await mkdir(path.dirname(target), { recursive: true }); await copyFile(file.startsWith('dist/') ? path.join(runtimeDirectory, file.slice(5)) : file, target);
   }
   const version = JSON.parse(await readFile('package.json', 'utf8')).version;
@@ -29,6 +29,10 @@ try {
   result.install = await invoke('plugin', 'install', 'stampede', '--marketplace', plugin, '--scope', 'user', '--json');
   if (result.install.code !== 0) throw new Error('isolated plugin install failed');
   result.enabled = await invoke('mcp', 'list');
+  // Opening the plugin source as a workspace must not discover a second,
+  // plain project server with unresolved plugin-only variables.
+  result.fromPluginRoot = await capture(binary, ['mcp', 'list'], plugin, env);
+  if (result.fromPluginRoot.code !== 0 || !result.fromPluginRoot.stdout.includes('plugin:stampede:stampede') || /(?:^|\n)stampede:|Failed to connect|Missing environment variables/.test(result.fromPluginRoot.stdout + result.fromPluginRoot.stderr)) throw new Error('plugin workspace MCP discovery failed');
   result.disabled = await invoke('--settings', path.join(fixture, 'disabled.json'), 'mcp', 'list');
   result.excluded = result.enabled.stdout.includes('stampede') && !result.disabled.stdout.includes('plugin:stampede:stampede');
   descriptor = JSON.parse(await readFile(path.join(home, 'hub.json'), 'utf8'));

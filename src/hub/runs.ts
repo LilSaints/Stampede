@@ -10,6 +10,7 @@ import { launchTurn } from '../backends/procs.js';
 import { codexSchema, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
 import { externalTools } from '../backends/tool-usage.js';
+import { claudeContext, claudeWindow, codexContext } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
@@ -285,6 +286,22 @@ export class RunExecution {
     this.contexts.set(name, context); this.run.agents.push(agent);
     this.syncPeer(agent); return context;
   }
+  // Codex's rollout is read at most every 2s while a turn streams, and always
+  // when it ends; a missing or unreadable rollout leaves the last value.
+  // Reads can overlap (a throttled one still in flight when the turn ends), so
+  // only the latest one started applies its result.
+  private codexRead = new Map<string, { at: number; n: number }>();
+  private codexContext(a: Agent, final: boolean) {
+    const last = this.codexRead.get(a.id) ?? { at: 0, n: 0 };
+    if (!a.sessionId || !final && Date.now() - last.at < 2000) return;
+    const n = last.n + 1;
+    this.codexRead.set(a.id, { at: Date.now(), n });
+    void codexContext(a.sessionId).then(found => {
+      if (!found || this.codexRead.get(a.id)?.n !== n) return;
+      a.context = { tokens: found.tokens, ...(found.window ? { window: found.window } : {}) };
+      a.model = found.model ?? a.model;
+    }).catch(() => {});
+  }
   private syncPeer(a: Agent) { this.peers.set(a.name, { name: a.name, backend: a.backend, comms: a.comms.enabled, canMessage: a.comms.canMessage, status: a.status, markedDone: a.markedDone, turn: a.turns.length }); }
   async status(c: AgentContext, status: Agent['status']) {
     c.agent.status = status; c.agent.lastActivityAt = now(); this.syncPeer(c.agent);
@@ -369,14 +386,23 @@ export class RunExecution {
         a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id;
         const tools = externalTools(event);
         if (tools.length) a.externalTools = [...new Set([...(a.externalTools ?? []), ...tools])].slice(0, 100);
+        if (a.backend === 'claude') {
+          if (event.type === 'system' && typeof event.model === 'string') a.model = event.model;
+          if (event.type === 'system' && event.subtype === 'init' && typeof event.apiKeySource === 'string') a.billing = event.apiKeySource === 'none' ? 'subscription' : 'api';
+          const context = claudeContext(event), window = claudeWindow(event);
+          if (context || window) a.context = { tokens: context?.tokens ?? a.context?.tokens ?? 0, ...((window ?? a.context?.window) ? { window: window ?? a.context?.window } : {}) };
+        } else if (event.type === 'item.completed' || event.type === 'turn.completed') this.codexContext(a, event.type === 'turn.completed');
       } });
       await this.status(c, 'running');
       const outcome = await c.handle.done; c.handle = undefined; this.run.counters.agentsRunning--;
       if (a.access !== 'read-only') await invalidateFingerprint(a.workspace.path, a.access === 'full');
       turn.endedAt = now(); turn.outcome = outcome; a.sessionId = outcome.sessionId ?? a.sessionId;
+      if (a.backend === 'codex') { a.model ??= launch.model; this.codexContext(a, true); }
       for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) a.usage[key] += outcome.usage[key];
       const pricing = a.backend === 'codex' ? this.config.pricing.codex?.[launch.model!] : undefined;
       if (pricing) outcome.usage.usd = (Math.max(0, outcome.usage.inputTokens - outcome.usage.cachedInputTokens) * pricing.inputPerMTok + outcome.usage.cachedInputTokens * pricing.cachedPerMTok + (outcome.usage.outputTokens + outcome.usage.reasoningTokens) * pricing.outputPerMTok) / 1e6;
+      // Codex has no USD of its own: one priced from the user's configured rates is treated as billed.
+      if (pricing) a.billing = 'api';
       if (outcome.usage.usd !== null) { a.usage.usd = (a.usage.usd ?? 0) + outcome.usage.usd; this.run.budget.spentUsd += outcome.usage.usd; }
       this.run.budget.spentTokens += outcome.usage.outputTokens + (a.backend === 'codex' ? outcome.usage.reasoningTokens : 0);
       this.runtime?.setSpent(this.run.budget.spentTokens);

@@ -10,10 +10,8 @@ export interface StampedeUiState {
   pendingWake: { runId: string; hubSeq: number; kind: string; text: string }[];
   wakeTimes: number[];
   composer: { to: string; text: string } | null;
-  inFlight: boolean;
   wakeInFlight?: boolean;
   wakeSeen?: Record<string, number>;
-  lastPoll: number;
   wakeEnabled: boolean;
   compactBand?: boolean;
   dismissedAlertSeq?: number;
@@ -24,6 +22,9 @@ export interface StampedeUiState {
   lastTrigger: number;
   lastToast: number;
   cancelConfirm: boolean;
+  expandedPhases?: Record<string, boolean>;
+  dismissedRuns?: string[];
+  finishedCollapsed?: boolean;
   actionPending: boolean;
   uiConfig: { pollMs: number; idlePollMs: number; wakeDebounceMs: number; maxWakesPerHour: number };
 }
