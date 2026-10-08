@@ -52,15 +52,18 @@ test('wakes debounce, cap burst delay, suppress busy and coalesce submissions', 
   expect(shouldWake(state, 16000, true)).toBe(true);
   expect(shouldWake(state, 3601001)).toBe(true);
 });
-for (const surface of ['terminal', 'desktop'] as const) for (const width of [40, 100, 160]) {
+for (const surface of ['terminal', 'desktop'] as const) for (const width of [38, 40, 60, 100, 160]) {
   test(`pane renders and confirms cancellation on ${surface} at ${width}`, async ($, on) => {
-    let state = { ...initialState(), hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: run() }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
+    const fixture: any = { ...run(), agents: [{ name: 'worker', backend: 'codex', status: 'idle', tokens: 3, comms: true }] };
+    let state = { ...initialState(), hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: fixture }, ownedRunIds: ['owned'], selectedRunId: 'owned' };
     let version = 1;
     on('state.get', () => ({ value: { value: state, version } }));
     on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: width, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
     expect((await ui.drawn()).type).toBe('Box');
     expect(await ui.find({ key: 'cancel' })).toBeDefined();
+    expect(await ui.find({ key: 'skip-worker' })).toBeDefined();
+    expect(await ui.find({ key: 'retry-worker' })).toBeDefined();
     expect(await ui.find({ key: 'confirm' })).toBeUndefined();
     await ui.press({ key: 'cancel' });
     expect(state.cancelConfirm).toBe(true);
@@ -146,8 +149,11 @@ for (const surface of ['terminal', 'desktop'] as const) test(`pane actions route
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(value) } };
   });
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'inline' } as any });
+  state = { ...state, composer: { to: 'worker', text: 'Keep this draft while pausing' } }; version++;
   await ui.press({ key: 'pause' });
   expect(posts.at(-1)?.body.action).toBe('pause');
+  expect(state.composer?.text).toBe('Keep this draft while pausing');
+  expect(state.actionPending).toBe(false);
   await ui.press({ key: 'retry-worker' });
   expect(posts.at(-1)?.route).toBe('agent_control');
   expect(posts.at(-1)?.body.action).toBe('retry');

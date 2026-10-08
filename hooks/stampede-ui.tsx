@@ -94,18 +94,25 @@ async function openPane($: Engine) { const placed = await $.ui.open({ id: 'stamp
       snapshot.value.hubSeq = updates.value.hubSeq;
       snapshot.value.reconcile = updates.value.truncated || held.hubSeq === 0;
       const next = reduce(held, snapshot.value, updates.value.events ?? [], session, now);
-      next.hub.url = snapshot.url; next.inFlight = false; next.lastPoll = now; next.actionPending = false;
-      await change($, s => ({ ...reduce(s, snapshot.value, updates.value.events ?? [], session, now), hub: next.hub, inFlight: false, lastPoll: now, actionPending: false }));
+      next.hub.url = snapshot.url; next.inFlight = false; next.lastPoll = now;
+      await change($, s => ({ ...reduce(s, snapshot.value, updates.value.events ?? [], session, now), hub: next.hub, inFlight: false, lastPoll: now }));
       $.ui.status(statusText(next));
       if (next.pendingWake.length > held.pendingWake.length && now - held.lastToast > 5000) { $.ui.toast(clean(next.pendingWake.at(-1)!.text, 120)); await change($, s => ({ ...s, lastToast: now })); }
       await flush($);
     } catch (error) { await change($, s => ({ ...s, inFlight: false, hub: { ...s.hub, ok: false, lastError: String(error) } })); }
   }
   async function action($: Engine, tool: string, input: any) {
-    const held = await state($); if (held.hub.versionMismatch || held.actionPending) return;
-    await change($, s => ({ ...s, actionPending: true }));
-    try { await request($, `/v1/orch/${tool}`, input); await change($, s => ({ ...s, lastPoll: 0, cancelConfirm: false, composer: null })); await poll($); }
-    catch (error) { $.ui.toast(`Stampede: ${clean(String(error), 160)}`); await change($, s => ({ ...s, actionPending: false })); }
+    const current = await $.state.get({ plugin: 'stampede', key: 'ui' });
+    const held = current.value ?? initialState(); if (held.hub.versionMismatch || held.actionPending) return;
+    const claimed = await $.state.set({ plugin: 'stampede', key: 'ui' }, { ...held, actionPending: true }, { ifVersion: current.version });
+    if (!claimed.isSet) return;
+    try {
+      await request($, `/v1/orch/${tool}`, input);
+      const cancelled = tool === 'workflow_control' && input.action === 'cancel';
+      await change($, s => ({ ...s, lastPoll: 0, cancelConfirm: cancelled ? false : s.cancelConfirm, composer: tool === 'workflow_send' || cancelled ? null : s.composer }));
+      await poll($);
+    } catch (error) { $.ui.toast(`Stampede: ${clean(String(error), 160)}`); }
+    finally { await change($, s => ({ ...s, actionPending: false })); }
   }
 export const register: Register = (on, options) => {
   on('ui.close', { id: 'stampede' }, async ($, event, next) => {
@@ -164,8 +171,8 @@ export const register: Register = (on, options) => {
           const agents = run.agents.filter((a: any) => a.phase === phase.title || !a.phase && index === 0);
           const shown = Math.min(agents.length, 30, rowsRemaining); rowsRemaining -= shown;
           return <Box key={phase.title} flexDirection="column"><Text>{`${clean(phase.title, 60)} · ${agents.length} agents`}</Text>
-            {width >= 40 && agents.slice(0, shown).map((a: any) => <Box key={a.name}><Text>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
-            {width >= 40 && agents.length > shown && <Text>{`…and ${agents.length - shown} more`}</Text>}
+            {agents.slice(0, shown).map((a: any) => <Box key={a.name} flexDirection={width < 60 ? 'column' : 'row'}><Text>{`${a.backend} ${clean(a.name, 40)} · ${a.status}${width >= 60 ? ` · ${a.tokens} tokens` : ''}`}</Text>{!['done', 'failed', 'cancelled', 'skipped'].includes(a.status) && <Box><Button key={`skip-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'skip' }); }}>Skip</Button><Button key={`retry-${a.name}`} dimColor={held.actionPending || held.hub.versionMismatch} onPress={() => { void action($, 'agent_control', { runId: run.runId, agent: a.name, action: 'retry' }); }}>Retry</Button></Box>}</Box>)}
+            {agents.length > shown && <Text>{`…and ${agents.length - shown} more`}</Text>}
           </Box>;
         })}
         <Text>{`Messages (${run.unreadForOrchestrator ?? 0} for Claude; latest 10 shown)`}</Text>

@@ -16,7 +16,7 @@
 ## Verification completed
 
 - 27 core tests pass. Delivery testing covers 1,000 seeded schedules with 600 worker deliveries each. Integration covers admission timeout, idle release, pending-message retention at resume limits, auth fast-failure, timeout retry, budget limits, delayed final output after mark_done, run-end drain, cache replay, and orphan recovery.
-- 15 plugin tests pass, including terminal/desktop render fixtures at widths 40/100/160, mutating pane actions, actual plugin tool-prefix interception, polling/wake behavior and a bounded 1,000-agent pane.
+- 19 plugin tests pass, including terminal/desktop render fixtures at body widths 38/40/60/100/160, retained agent controls, draft preservation during Pause, mutating pane actions, actual plugin tool-prefix interception, polling/wake behavior and a bounded 1,000-agent pane.
 - Core and installed-host mod TypeScript checks pass. Strict plugin validation passes.
 - Real Claude-to-Codex schema pipeline and mixed-backend coordination team pass.
 - Eight concurrent Codex conversations over three waves (24 turns) pass with shared home and correct resume identity.
@@ -28,9 +28,14 @@ See [spikes/RESULTS.md](spikes/RESULTS.md) for the capability matrix, selected f
 - Self-contained release bundles install in an isolated Claude configuration with no `node_modules`; the installed MCP connects and a bundled workflow returns 42. Generated disable settings remove the installed orchestrator MCP from workers. No credentials were copied.
 - Dedicated hook startup: 30 launches, p95 149.56 ms. The bundled full-CLI path missed the target, so workers use `dist/hook.js`. Its real claim/print/ack transport passes integration testing.
 
+- GitHub Actions now runs Node 22 core tests on Windows and Ubuntu. Both jobs passed for commit `c5e969a`: [CI run](https://github.com/LilSaints/Stampede/actions/runs/37741506755).
+- Live terminal checks at 40/100/160 columns used a real hub and fake workers with no model calls. Controls exercised across those widths: Pause/Resume, Enter-send and Send button, recipient Select, Retry, Skip, copy-path OSC52, Cancel/No/Yes, composer Close and Escape. Mutation responses appeared within the 270 ms tool observation window. This exposed and fixed hidden agent controls in the actual 38-column body of a 40-column terminal. Evidence is in `spikes/artifacts/ui-widths-20261008/manual-summary.json`.
+
 ## Remaining release gates
 
-1. Complete the live host checklist: Claude desktop Code tab transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner; live terminal layouts and every action at 40/100/160. Renderer fixtures cover these sizes and actions, but do not establish actual host painting. Available computer-control tools cannot operate the desktop Code tab; user verification has been requested.
-2. Review acceptance evidence, then create a versioned release with `dist/cli.js`, `dist/worker.js`, `dist/hook.js` and `dist/windows-helper.ps1` committed as required by the spec. Development checkouts build with `npm ci` and `npm run build`.
+1. Complete the live Claude desktop Code-tab checklist: transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner. Available computer-control tools cannot operate this surface; user verification has been requested. Terminal controls were exercised across the required widths, but not every action was repeated at every width.
+2. Finish the requirement-level integration audit in SPEC §24. The 1,000-schedule test directly exercises the bus; it does not yet prove the full four-process mixed-backend burst/resume invariant. The fake team currently calls HTTP directly, so it also does not substitute for the required shim/hook delivery-fault suite. Explicit parity examples on both fake backends and the full cache-invalidation matrix need matching end-to-end evidence. Earlier broad “implemented” summaries must not be treated as proof of these acceptance gates.
+3. Review the remaining actual-backend E2E evidence against the exact §24/§25 scenarios (peer exchange, message-driven resume, parity examples and parallel batch), without treating the already-passing pipeline/team smoke tests as coverage of every scenario.
+4. After acceptance, create a versioned release with `dist/cli.js`, `dist/worker.js`, `dist/hook.js` and `dist/windows-helper.ps1` committed as required by the spec. Development checkouts build with `npm ci` and `npm run build`.
 
 The code is reviewable and the automated checks pass. These outstanding gates prevent declaring the original “Finish V1” goal complete.
