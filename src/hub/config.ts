@@ -75,7 +75,14 @@ export function validateConfig(config: Config) {
   }
   return config;
 }
-export async function loadConfig(home: string) { return validateConfig(merge(defaults(), await readJson(path.join(home, 'config.json')) ?? {})); }
+export async function loadConfig(home: string) {
+  const base = defaults();
+  const config = validateConfig(merge(base, await readJson(path.join(home, 'config.json')) ?? {}));
+  // The Workflow per-run ceiling is a backstop, even when home configuration
+  // raises the global/backend pools. Project overrides may still lower it.
+  config.scheduler.perRun = Math.min(config.scheduler.perRun, base.scheduler.perRun);
+  return validateConfig(config);
+}
 /** Project and run overrides are allowed only to reduce numeric safety limits. */
 export function lowerConfig(base: Config, overrides: any): Config {
   const result = structuredClone(base);

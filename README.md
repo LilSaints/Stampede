@@ -33,7 +33,7 @@ node dist/cli.js gc --worktrees
 
 Restart refuses while a run is active; `--force` interrupts it. Retention removes expired terminal artifacts and keeps summaries by default. Worktree collection asks for confirmation, refuses uncommitted changes and keeps branches. Inspect those branches before integrating changes.
 
-Configuration is `STAMPEDE_HOME/config.json`. Project `.stampede/config.json` can only lower numeric limits. Read-only is the default access tier. Claude's contained tier denies arbitrary shell tools; Codex uses its sandbox. These controls do not make untrusted JavaScript or model output safe to execute. The state directory is protected by an exact current-user DACL on Windows, with process-ancestry checks as additional hardening.
+Configuration is `STAMPEDE_HOME/config.json`. Project `.stampede/config.json` can only lower numeric limits. Per-run concurrency cannot exceed `max(1, min(16, cpus − 2))`, even when the home config raises the global or backend pools. Read-only is the default access tier. Claude's contained tier denies arbitrary shell tools; Codex uses its sandbox. These controls do not make untrusted JavaScript or model output safe to execute. The state directory is protected by an exact current-user DACL on Windows, with process-ancestry checks as additional hardening.
 
 ## Verification
 
