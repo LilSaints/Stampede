@@ -2,6 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseWorkflow } from '../../src/runtime/parse.js';
 import { executeWorkflow } from '../../src/runtime/hooks.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { RunExecution, RunManager } from '../../src/hub/runs.js';
+import { defaults } from '../../src/hub/config.js';
+import { Store } from '../../src/hub/store.js';
+import type { Run } from '../../src/hub/model.js';
 
 const meta = `export const meta = {name: 'test', description: 'runtime contract'};\n`;
 function run(body: string, call: (method: string, params: any) => Promise<unknown> = async () => null, extra = {}) { return executeWorkflow({ source: meta + body, call, ...extra }); }
@@ -24,8 +31,42 @@ return {result, pipe};`).result;
   assert.deepEqual(value, { result: [1, null, 3], pipe: [[3, 2, 0], null, [7, 6, 2]] });
 });
 test('caps reject before invoking callbacks', async () => {
-  await assert.rejects(run('return parallel(Array(4097).fill(() => 1));').result, /4096/);
-  await assert.rejects(run('return pipeline(Array(4097), x => x);').result, /4096/);
+  assert.equal((await run('return parallel(Array(4096).fill(() => 1));').result as number[]).length, 4096);
+  assert.equal((await run('return pipeline(Array(4096).fill(1), x => x + 1);').result as number[]).length, 4096);
+  const calls: string[] = [];
+  const call = async (method: string) => { calls.push(method); return null; };
+  await assert.rejects(run('return parallel(Array(4097).fill(() => log("unexpected callback")));', call).result, /4096/);
+  await assert.rejects(run('return pipeline(Array(4097).fill(1), x => log("unexpected callback"));', call).result, /4096/);
+  assert.deepEqual(calls, []);
+});
+test('the 1000-agent lifetime ceiling includes terminal members and rejects partial teams', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stampede-lifetime-cap-'));
+  const config = defaults(), unavailable = { available: false, capabilities: {} };
+  const manager = new RunManager(new Store(home), config, { claude: unavailable, codex: unavailable }, 'unused');
+  const record: Run = {
+    id: 'run_cap', name: 'lifetime', cwd: home, scriptPath: 'cap.js', scriptSha256: '', args: null, status: 'running',
+    phases: [], createdAt: new Date().toISOString(), budget: { totalTokens: null, spentTokens: 0, totalUsd: null, spentUsd: 0 },
+    counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, agents: [], log: [], defaultBackend: 'claude', seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0
+  };
+  const execution = new RunExecution(manager, record, config);
+  try {
+    // Exercise actual admission records without launching 1000 processes.
+    for (let i = 0; i < 999; i++) {
+      const context = execution.prepare('fixture', {});
+      context.agent.status = 'done'; context.agent.result = 'fixture';
+      execution.peers.get(context.agent.name)!.status = 'done';
+    }
+    await assert.rejects(execution.spawnTeam([{ name: 'a', prompt: 'fixture' }, { name: 'b', prompt: 'fixture' }], {}), /invalid team size/);
+    assert.equal(record.counters.agentsStarted, 999);
+    assert.equal(execution.teams.size, 0);
+    execution.prepare('last permitted', {});
+    assert.equal(record.agents.length, 1000);
+    await assert.rejects(run('return await agent("overflow");', (method, params) => execution.call(method, params)).result, /1000-agent cap reached/);
+    assert.equal(record.counters.agentsStarted, 1000);
+    assert.equal(execution.contexts.size, 1000);
+    assert.equal(manager.scheduler.snapshot().held.length, 0);
+    assert.equal(manager.scheduler.snapshot().queued.length, 0);
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
 test('nondeterministic APIs and host globals are unavailable', async () => {
   for (const expression of ['Date.now()', 'new Date()', 'Date()', 'Math.random()']) await assert.rejects(run(`return ${expression};`).result, /non-deterministic API/);

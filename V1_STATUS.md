@@ -54,6 +54,8 @@ See [spikes/RESULTS.md](spikes/RESULTS.md) for the capability matrix, selected f
 
 - Fresh release-candidate bundles from runtime commit 24afad0 pass isolated installation without node_modules: MCP connects, disabled-plugin settings remove the server, and the packaged workflow returns 42. Zero model calls; the temporary installation was removed. The four files and SHA-256 manifest are in spikes/artifacts/release-candidate-24afad0; package evidence is in spikes/artifacts/s17-current-24afad0/summary.json. The long qualification retains its original dist files.
 
+- Exact admission boundaries pass through the runtime: 4,096 parallel/pipeline entries are accepted, 4,097 reject before any callback RPC; 999 terminal agent records still consume lifetime capacity, a two-member team then rejects without partial admission, the 1,000th member is admitted, and the next agent() throws across the workflow worker boundary. This test uses actual admission records with no worker-process launches. Local coverage totals 48 tests across the verified full run and focused additions.
+
 ## Remaining release gates
 
 1. Complete the live Claude desktop Code-tab checklist: transport, pane/input/select/action behavior, attributed wake, restart recovery and mismatch banner. Available computer-control tools cannot operate this surface; user verification has been requested. The worker-control checklist now passes independently at all three required terminal widths; desktop verification and manual Wake now remain pending. Band Open, alert dismissal, completed-run inbox visibility and run-tab hotkeys now pass at all three widths.
