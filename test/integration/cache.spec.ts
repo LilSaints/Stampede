@@ -6,6 +6,7 @@ import os from 'node:os';
 import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
 import { git } from '../../src/hub/workspaces.js';
+import { readJournal } from '../../src/hub/store.js';
 
 const meta = 'export const meta={name:"cache validity",description:"real worker cache boundaries"};\n';
 test('resume verifies files, explicit inputs, kept branches, edit effects and board taint', { timeout: 60000 }, async () => {
@@ -18,7 +19,7 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
   const config = defaults(); config.defaultBackend = 'codex';
   config.scheduler.maxConcurrent = 4; config.scheduler.perRun = 4; config.scheduler.codex.maxConcurrent = 3;
   const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-codex.mjs'), version: '0.159.2', capabilities: {} };
-  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { available: false, capabilities: {} } } });
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { ...fake, entry: path.resolve('test/fake-backends/fake-claude.mjs'), version: '2.1.292' } } });
   const complete = async (started: { runId: string }) => {
     await hub.manager.active.get(started.runId)?.task;
     const run = hub.manager.get(started.runId);
@@ -55,5 +56,45 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
     const sharedRepeat = await resume(shared.id); assert.equal(sharedRepeat.cacheHits, 0); assert.equal(sharedRepeat.liveCalls, 1);
     const board = await start('return await agent("fixture:read-board",{comms:true});');
     const boardRepeat = await resume(board.id); assert.equal(boardRepeat.cacheHits, 0); assert.equal(boardRepeat.liveCalls, 1);
+    const boardJournal = await readJournal<any>(path.join(hub.manager.store.runDir(board.id), 'journal.jsonl'));
+    assert.deepEqual(boardJournal[0].shared, { reads: ['read_board'], writes: [] });
+    for (const backend of ['claude', 'codex']) {
+      const external = await start(`return await agent("fixture:external",{backend:"${backend}"});`);
+      const journal = await readJournal<any>(path.join(hub.manager.store.runDir(external.id), 'journal.jsonl'));
+      assert.deepEqual(journal[0].externalTools, ['WebSearch', 'mcp__research__lookup']);
+      assert.ok(!JSON.stringify(journal).includes('fixture-not-for-journal'));
+      const hit = await resume(external.id);
+      assert.equal(hit.cacheHits, 1); assert.equal(hit.liveCalls, 0);
+      assert.deepEqual(hit.cacheReport?.cachedExternalTools, [{ label: external.agents[0].label, tools: ['WebSearch', 'mcp__research__lookup'] }]);
+    }
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('queued teams refresh workspace fingerprints after another run writes', { timeout: 30000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-queued-cache-'));
+  const cwd = path.join(root, 'work'); await mkdir(cwd);
+  const config = defaults(); config.defaultBackend = 'codex';
+  config.scheduler.maxConcurrent = 3; config.scheduler.perRun = 3; config.scheduler.codex.maxConcurrent = 3;
+  const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-codex.mjs'), version: '0.159.2', capabilities: {} };
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { available: false, capabilities: {} } } });
+  const until = async (check: () => boolean) => {
+    const deadline = Date.now() + 10000;
+    while (!check()) { if (Date.now() > deadline) throw new Error('queued fingerprint fixture timed out'); await new Promise(resolve => setTimeout(resolve, 10)); }
+  };
+  try {
+    const holder = await hub.manager.start({ cwd, script: meta + 'await spawnTeam([{name:"hold-a",prompt:"idle"},{name:"hold-b",prompt:"idle"}]); await new Promise(()=>{});' });
+    await until(() => hub.manager.get(holder.runId).agents.length === 2 && hub.manager.get(holder.runId).agents.every(a => a.status === 'idle'));
+    const target = await hub.manager.start({ cwd, script: meta + 'const t=await spawnTeam([{name:"target",prompt:"fixture:team-target"}]); return await t.untilDone(undefined,{maxMs:20000});' });
+    await until(() => hub.manager.scheduler.snapshot().queued.some(gang => gang.some(slot => slot.runId === target.runId)));
+    const writer = await hub.manager.start({ cwd, script: meta + 'return await agent("fixture:edit",{access:"edit",isolation:"shared"});' });
+    await hub.manager.active.get(writer.runId)!.task;
+    assert.equal(hub.manager.get(writer.runId).agents[0].status, 'done');
+    await hub.manager.control(holder.runId, 'cancel');
+    await hub.manager.active.get(target.runId)!.task;
+    assert.equal(hub.manager.get(target.runId).status, 'completed');
+    const replay = await hub.manager.resume(target.runId, {});
+    await hub.manager.active.get(replay.runId)!.task;
+    assert.equal(hub.manager.get(replay.runId).cacheHits, 1);
+    assert.equal(hub.manager.get(replay.runId).liveCalls, 0);
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });

@@ -2,14 +2,15 @@ import path from 'node:path';
 import { readJournal } from './store.js';
 import { git, type Workspace } from './workspaces.js';
 import type { BoardEntry, Message } from './bus.js';
-export interface TeamRecord { teamKey: string; occ: number; runId: string; status: string; members: { name: string; status: string; result: unknown; markedDone: boolean; effects: Workspace; cacheable: boolean }[]; boardEntries: BoardEntry[]; messages: Message[] }
-export interface CallRecord { key: string; occ: number; agentId: string; status: string; result: unknown; cacheable: boolean; tainted: boolean; effects: Workspace; inputs: unknown }
+export interface TeamRecord { teamKey: string; occ: number; runId: string; status: string; members: { name: string; status: string; result: unknown; markedDone: boolean; effects: Workspace; cacheable: boolean; externalTools?: string[] }[]; boardEntries: BoardEntry[]; messages: Message[] }
+export interface CallRecord { key: string; occ: number; agentId: string; status: string; result: unknown; cacheable: boolean; tainted: boolean; effects: Workspace; inputs: unknown; shared?: { reads: string[]; writes: string[] }; externalTools?: string[] }
 export class RunCache {
   private occurrences = new Map<string, number>();
   private records = new Map<string, CallRecord>();
   private teams = new Map<string, TeamRecord>();
   readonly verificationFailures: string[] = [];
   readonly notCacheable: { label: string; reason: string }[] = [];
+  readonly cachedExternalTools: { label: string; tools: string[] }[] = [];
   async load(runDirectory: string) {
     for (const record of await readJournal<CallRecord>(path.join(runDirectory, 'journal.jsonl'))) if (record.key) this.records.set(`${record.key}:${record.occ}`, record);
     for (const record of await readJournal<TeamRecord>(path.join(runDirectory, 'teams.jsonl'))) if (record.teamKey) this.teams.set(`${record.teamKey}:${record.occ}`, record);

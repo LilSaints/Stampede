@@ -9,6 +9,7 @@ import { type AgentLaunch, type TurnHandle, zeroUsage } from '../backends/adapte
 import { launchTurn } from '../backends/procs.js';
 import { codexSchema, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
+import { externalTools } from '../backends/tool-usage.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
@@ -16,7 +17,7 @@ import { Scheduler, AdmissionError } from './scheduler.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
 import { type Agent, type AgentOpts, type Run, agentTerminal, runTerminal } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
-import { Mutex, hash, canonical, fingerprint, createWorkspace, finishWorkspace, repoRoot } from './workspaces.js';
+import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, repoRoot } from './workspaces.js';
 
 const now = () => new Date().toISOString();
 const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -30,6 +31,7 @@ interface AgentContext {
   task?: Promise<void>; handle?: TurnHandle; release?: (id?: string) => void; tainted: boolean; resumeScheduled: boolean; launch?: AgentLaunch;
   key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean;
   finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
+  shared: { reads: string[]; writes: string[] };
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
 export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; limits?: Partial<Config['limits']> }
@@ -108,7 +110,7 @@ export class RunManager extends EventEmitter {
     const run: Run = { id, name: parsed.meta.name, cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
-    run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures };
+    run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
     const limits = effective.scheduler;
     this.scheduler.configureRun(id, { global: limits.maxConcurrent, perRun: limits.perRun, claude: limits.claude.maxConcurrent, codex: limits.codex.maxConcurrent, reserve: limits.nonCommsReserve, admissionMaxMs: limits.admissionMaxMs });
     if (resumeOf) await execution.cache.load(this.store.runDir(resumeOf));
@@ -144,6 +146,9 @@ export class RunManager extends EventEmitter {
 export class RunExecution {
   readonly abort = new AbortController();
   readonly cache = new RunCache();
+  // Resume starts a fresh memo: edits made between runs must be visible even
+  // inside the TTL. Writer generations invalidate other active runs as well.
+  private readonly fingerprints: FingerprintMemo = new Map();
   readonly contexts = new Map<string, AgentContext>();
   readonly peers = new Map<string, Peer>();
   readonly teams = new Map<string, Team>();
@@ -174,6 +179,11 @@ export class RunExecution {
     await this.event('backend.unavailable', { backend, error, hint });
   }
   event(type: string, value: any = {}) { return this.manager.event(this.run, type, value); }
+  sharedUse(name: string, tool: string, write = false) {
+    const c = this.contexts.get(name)!; c.tainted = true;
+    const uses = write ? c.shared.writes : c.shared.reads;
+    if (!uses.includes(tool)) uses.push(tool);
+  }
   async fail(error: Error) { if (!runTerminal(this.run.status)) { this.run.error = { message: error.message, stack: error.stack }; await this.cancel('failed'); } }
   budgetAvailable() { const b = this.run.budget; return (b.totalTokens === null || b.spentTokens < b.totalTokens) && (b.totalUsd === null || b.spentUsd < b.totalUsd); }
   async execute(source: string) {
@@ -253,7 +263,7 @@ export class RunExecution {
     const agent: Agent = { id: `agt_${ulid()}`, runId: this.run.id, name, label: opts.label ?? name, role: opts.role, phase: opts.phase ?? this.run.phase, backend, mode: 'oneshot', comms: { enabled, canMessage }, access, workspace: { kind: isolation, path: path.resolve(this.run.cwd, opts.cwd ?? '.') }, status: 'queued', markedDone: false, usage: zeroUsage(), resumes: 0, stopBlocks: 0, lastActivityAt: now(), turns: [], teamId };
     let resolve!: (value: unknown) => void; const done = new Promise(r => { resolve = r; });
     const token = randomBytes(32).toString('hex');
-    const context: AgentContext = { agent, opts, prompt, abort: new AbortController(), token, tokenHash: hash(token), done, resolve, tainted: false, resumeScheduled: false, autoDone: typeof opts.comms === 'object' ? opts.comms.autoDoneOnIdle ?? !teamId : !teamId };
+    const context: AgentContext = { agent, opts, prompt, abort: new AbortController(), token, tokenHash: hash(token), done, resolve, tainted: false, shared: { reads: [], writes: [] }, resumeScheduled: false, autoDone: typeof opts.comms === 'object' ? opts.comms.autoDoneOnIdle ?? !teamId : !teamId };
     this.contexts.set(name, context); this.run.agents.push(agent);
     this.syncPeer(agent); return context;
   }
@@ -265,17 +275,18 @@ export class RunExecution {
   }
   agentDir(agent: Agent) { return path.join(this.manager.store.runDir(this.run.id), 'agents', agent.id); }
   private slot(c: AgentContext) { return { id: c.agent.id, name: c.agent.name, runId: this.run.id, backend: c.agent.backend, comms: c.agent.comms.enabled }; }
-  private async identifyCall(c: AgentContext) {
-    if (c.key !== undefined) return;
-    const inputs = await fingerprint(c.agent.workspace.path, c.agent.workspace.kind, c.opts.cacheInputs ?? [], this.config.cache);
+  private async identifyCall(c: AgentContext, refresh = false) {
+    if (c.key !== undefined && !refresh) return;
+    const previousKey = c.key;
+    const inputs = await fingerprint(c.agent.workspace.path, c.agent.workspace.kind, c.opts.cacheInputs ?? [], this.config.cache, this.fingerprints);
     c.inputs = inputs;
     const agentType = c.agent.backend === 'codex' && c.opts.agentType ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const model = c.opts.model ?? agentType?.model ?? (c.agent.backend === 'codex' ? this.config.codex.defaultModel : undefined);
     const effort = c.opts.effort ?? agentType?.effort ?? (c.agent.backend === 'codex' ? this.config.codex.defaultEffort : undefined);
     c.key = hash(canonical({ spec: { prompt: c.prompt, ...c.opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
-    c.occ = this.cache.next(c.key);
+    if (previousKey !== c.key) c.occ = this.cache.next(c.key);
     c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && c.agent.access !== 'full' && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
-    if (!c.cacheable) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
+    if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
   }
   async dispatch(c: AgentContext, preReserved?: (id?: string) => void) {
     c.release = preReserved;
@@ -287,7 +298,11 @@ export class RunExecution {
       await this.identifyCall(c);
       if (c.cacheable && !c.agent.teamId) {
         const hit = await this.cache.lookup(c.key!, c.occ!);
-        if (hit) { c.cached = true; c.agent.result = hit.result; c.agent.workspace = hit.effects; this.run.cacheHits++; await this.finish(c, 'done'); return; }
+        if (hit) {
+          c.cached = true; c.agent.result = hit.result; c.agent.workspace = hit.effects; c.agent.externalTools = hit.externalTools;
+          if (hit.externalTools?.length) this.cache.cachedExternalTools.push({ label: c.agent.label, tools: hit.externalTools });
+          this.run.cacheHits++; await this.finish(c, 'done'); return;
+        }
       }
       if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
       await this.configure(c);
@@ -326,15 +341,20 @@ export class RunExecution {
       const n = a.turns.length + 1; const dir = this.agentDir(a);
       const launch = { ...c.launch!, stdoutPath: path.join(dir, `turn-${n}.stdout.jsonl`), stderrPath: path.join(dir, `turn-${n}.stderr.log`), lastMessagePath: path.join(dir, `turn-${n}.last.txt`) };
       const claim = a.comms.enabled ? await this.bus.claim(a.name, resume ? 'resume' : 'read', n, 50) : undefined;
-      if (claim?.messages.length) { c.tainted = true; prompt += '\n' + envelopes(claim.messages, claim.deliveries, this.peers); }
+      if (claim?.messages.length) { this.sharedUse(a.name, resume ? 'delivery:resume' : 'delivery:stdin'); prompt += '\n' + envelopes(claim.messages, claim.deliveries, this.peers); }
       const turn = { n, kind, startedAt: now(), stdoutPath: launch.stdoutPath, stderrPath: launch.stderrPath } as Agent['turns'][number];
       a.turns.push(turn); a.stopBlocks = 0;
       await this.status(c, resume ? 'resuming' : 'starting');
       await this.event('agent.turn.start', { name: a.name, n, kind });
       this.run.counters.agentsRunning++;
-      c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => { a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id; } });
+      c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => {
+        a.lastActivityAt = now(); if (event.thread_id || event.session_id) a.sessionId = event.thread_id ?? event.session_id;
+        const tools = externalTools(event);
+        if (tools.length) a.externalTools = [...new Set([...(a.externalTools ?? []), ...tools])].slice(0, 100);
+      } });
       await this.status(c, 'running');
       const outcome = await c.handle.done; c.handle = undefined; this.run.counters.agentsRunning--;
+      if (a.access !== 'read-only') await invalidateFingerprint(a.workspace.path, a.access === 'full');
       turn.endedAt = now(); turn.outcome = outcome; a.sessionId = outcome.sessionId ?? a.sessionId;
       for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) a.usage[key] += outcome.usage[key];
       const pricing = a.backend === 'codex' ? this.config.pricing.codex?.[launch.model!] : undefined;
@@ -389,7 +409,7 @@ export class RunExecution {
       if (c.agent.workspace.kind === 'worktree' && c.agent.workspace.repo) await this.event(c.agent.workspace.kept ? 'worktree.kept' : 'worktree.removed', { name: c.agent.name, workspace: c.agent.workspace });
     }
     await this.status(c, status); await this.bus.terminate(c.agent.name); c.release?.(c.agent.id); c.release = undefined;
-    if (c.key !== undefined) await this.manager.store.append(path.join(this.manager.store.runDir(this.run.id), 'journal.jsonl'), { key: c.key, occ: c.occ, agentId: c.agent.id, backend: c.agent.backend, status, result: c.agent.result ?? null, inputs: c.inputs, cacheable: c.cacheable ?? false, tainted: c.tainted, effects: c.agent.workspace, usage: c.agent.usage });
+    if (c.key !== undefined) await this.manager.store.append(path.join(this.manager.store.runDir(this.run.id), 'journal.jsonl'), { key: c.key, occ: c.occ, agentId: c.agent.id, backend: c.agent.backend, status, result: c.agent.result ?? null, inputs: c.inputs, cacheable: c.cacheable ?? false, tainted: c.tainted, shared: c.shared, externalTools: c.agent.externalTools ?? [], effects: c.agent.workspace, usage: c.agent.usage });
     c.token = ''; c.resolve(status === 'done' ? c.agent.result : null);
   }
   scheduleResumes() {
@@ -424,7 +444,7 @@ export class RunExecution {
   }
   private async cancelNow(status: Run['status']) {
     this.run.status = status; this.run.endedAt = now(); this.abort.abort();
-    await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
+    await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await c.finishing; if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
     await Promise.allSettled([...this.teams.values()].map(team => team.admission));
     this.manager.scheduler.pause(this.run.id, false); await this.event('run.status', { status });
   }
@@ -453,6 +473,7 @@ export class RunExecution {
     for (const c of members) {
       const handle = c.handle; await handle?.kill(); await handle?.done;
       await c.task?.catch(() => {});
+      await c.finishing;
       if (agentTerminal(c.agent.status)) continue;
       await this.finish(c, c.agent.status === 'idle' && c.agent.result !== undefined ? 'done' : 'cancelled');
     }
@@ -480,6 +501,8 @@ export class RunExecution {
       for (const c of contexts) {
         const member = replay.members.find(m => m.name === c.agent.name)!;
         c.cached = true; c.agent.result = member.result; c.agent.markedDone = member.markedDone; c.agent.workspace = member.effects;
+        c.agent.externalTools = member.externalTools;
+        if (member.externalTools?.length) this.cache.cachedExternalTools.push({ label: c.agent.label, tools: member.externalTools });
         this.run.cacheHits++; await this.finish(c, 'done');
       }
       for (const entry of replay.boardEntries) await this.bus.post(entry.author, { title: entry.title, body: entry.body, topic: entry.topic, data: entry.data, replayedFrom: replay.runId });
@@ -488,7 +511,14 @@ export class RunExecution {
     }
     team.admissionAbort = new AbortController();
     const admission = this.manager.scheduler.acquire(contexts.map(c => this.slot(c)), AbortSignal.any([this.abort.signal, team.admissionAbort.signal]));
-    team.admission = admission.then(release => { for (const c of contexts) { c.task = this.dispatch(c, release); void c.task.catch(e => this.fail(e)); } }).catch(async error => {
+    team.admission = admission.then(async release => {
+      try {
+        for (const c of contexts) await this.identifyCall(c, true);
+        const key = hash(canonical({ keys: contexts.map(c => c.key), topology: opts.topology ?? 'mesh', lead: opts.lead }));
+        if (key !== team.key) { team.key = key; team.occ = this.cache.next('team:' + key); }
+        for (const c of contexts) { c.task = this.dispatch(c, release); void c.task.catch(e => this.fail(e)); }
+      } catch (error) { release(); throw error; }
+    }).catch(async error => {
       for (const c of contexts) { c.agent.error = { kind: error instanceof AdmissionError ? 'admission_timeout' : error.kind ?? 'cancelled', message: error.message, blockedBy: error.blockedBy, waitedMs: error.waitedMs }; await this.finish(c, error instanceof AdmissionError || error.kind ? 'failed' : 'cancelled'); }
       if (error instanceof AdmissionError) await this.event('team.admission_blocked', { names, blockedBy: error.blockedBy });
     });
@@ -512,7 +542,7 @@ export class RunExecution {
       const admissionFailed = members.filter(c => c.agent.error?.kind === 'admission_timeout').map(c => c.agent.name);
       const notTerminal = members.filter(c => !agentTerminal(c.agent.status)).map(c => c.agent.name);
       if (admissionFailed.length) return { reason: 'admission-timeout', admissionFailed, ...(method === 'untilDone' ? { notTerminal: [] } : {}) };
-      if (!notTerminal.length) { await this.recordTeam(team); return { reason: method === 'untilDone' ? 'all-terminal' : 'all-done', admissionFailed: [], ...(method === 'untilDone' ? { notTerminal: [] } : {}) }; }
+      if (!notTerminal.length) { await Promise.all(members.map(c => c.finishing)); await this.recordTeam(team); return { reason: method === 'untilDone' ? 'all-terminal' : 'all-done', admissionFailed: [], ...(method === 'untilDone' ? { notTerminal: [] } : {}) }; }
       if (Date.now() - start >= maxMs) return { reason: 'max-ms', admissionFailed: [], ...(method === 'untilDone' ? { notTerminal } : {}) };
       if (method === 'untilQuiet') {
         if (!this.budgetAvailable()) return { reason: 'budget', admissionFailed: [] };
@@ -530,7 +560,7 @@ export class RunExecution {
   private async recordTeam(team: Team) {
     const contexts = team.names.map(name => this.contexts.get(name)!);
     const record: TeamRecord = { teamKey: team.key!, occ: team.occ!, runId: this.run.id, status: contexts.every(c => agentTerminal(c.agent.status)) ? 'complete' : 'partial',
-      members: contexts.map(c => ({ name: c.agent.name, status: c.agent.status, result: c.agent.result ?? null, markedDone: c.agent.markedDone, effects: c.agent.workspace, cacheable: c.cacheable ?? false })),
+      members: contexts.map(c => ({ name: c.agent.name, status: c.agent.status, result: c.agent.result ?? null, markedDone: c.agent.markedDone, effects: c.agent.workspace, cacheable: c.cacheable ?? false, externalTools: c.agent.externalTools })),
       boardEntries: this.bus.entries.filter(e => team.names.includes(e.author)), messages: team.replay?.messages ?? this.bus.messages.filter(m => team.names.includes(m.from) || team.names.includes(m.to) || m.to === '*') };
     await this.manager.store.append(path.join(this.manager.store.runDir(this.run.id), 'teams.jsonl'), record);
   }

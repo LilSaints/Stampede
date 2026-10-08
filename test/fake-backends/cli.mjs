@@ -60,9 +60,16 @@ if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || p
 }
 const output = process.env.STAMPEDE_FIXTURE_RESULT ?? scenarioOutput ?? prompt;
 if (codex) {
+  if (prompt === 'fixture:external') {
+    emit({ type: 'item.completed', item: { type: 'web_search', query: 'synthetic dependency' } });
+    for (const server of ['stampede', 'research']) emit({ type: 'item.completed', item: { type: 'mcp_tool_call', server, tool: 'lookup', arguments: { secret: 'fixture-not-for-journal' } } });
+  }
   emit({ type: 'thread.started', thread_id: id });
   emit({ type: 'turn.started' });
   emit({ type: 'item.completed', item: { type: 'agent_message', text: output } });
   emit({ type: 'turn.completed', usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 3, reasoning_output_tokens: 1 } });
   const last = argv.indexOf('-o'); if (last >= 0) await writeFile(argv[last + 1], output);
-} else emit({ type: 'result', subtype: 'success', session_id: id, result: output, ...(argv.includes('--json-schema') ? { structured_output: JSON.parse(output) } : {}), usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.001 });
+} else {
+  if (prompt === 'fixture:external') emit({ type: 'assistant', message: { content: ['WebSearch', 'mcp__research__lookup', 'mcp__stampede__lookup'].map(name => ({ type: 'tool_use', name, input: { secret: 'fixture-not-for-journal' } })) } });
+  emit({ type: 'result', subtype: 'success', session_id: id, result: output, ...(argv.includes('--json-schema') ? { structured_output: JSON.parse(output) } : {}), usage: { input_tokens: 10, output_tokens: 3 }, total_cost_usd: 0.001 });
+}

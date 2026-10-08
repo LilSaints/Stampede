@@ -50,9 +50,23 @@ export function canonical(value: any): string {
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().filter(k => value[k] !== undefined).map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}';
   return JSON.stringify(value);
 }
-export async function fingerprint(cwd: string, isolation: 'shared' | 'worktree', inputs: string[], limits: { maxFingerprintFiles: number; maxFingerprintBytes: number }) {
+interface Fingerprint { cacheable: boolean; workspace: string; cacheInputs: Record<string, string>; reason?: string }
+export type FingerprintMemo = Map<string, { expiresAt: number; generation: string; value: Fingerprint }>;
+const fingerprintGenerations = new Map<string, number>();
+let fullAccessGeneration = 0;
+const scopeKey = (location: string) => process.platform === 'win32' ? path.resolve(location).toLowerCase() : path.resolve(location);
+export async function invalidateFingerprint(cwd: string, fullAccess = false) {
+  if (fullAccess) { fullAccessGeneration++; return; }
+  const scope = await repoRoot(cwd) ?? cwd;
+  await repoMutex(scope).run(async () => { const key = scopeKey(scope); fingerprintGenerations.set(key, (fingerprintGenerations.get(key) ?? 0) + 1); });
+}
+export async function fingerprint(cwd: string, isolation: 'shared' | 'worktree', inputs: string[], limits: { maxFingerprintFiles: number; maxFingerprintBytes: number; fingerprintTtlMs?: number }, memo?: FingerprintMemo): Promise<Fingerprint> {
   const repo = await repoRoot(cwd);
   return repoMutex(repo ?? cwd).run(async () => {
+    const key = canonical({ cwd: scopeKey(cwd), isolation, inputs, files: limits.maxFingerprintFiles, bytes: limits.maxFingerprintBytes, ttl: limits.fingerprintTtlMs ?? 0 });
+    const generation = `${fullAccessGeneration}:${fingerprintGenerations.get(scopeKey(repo ?? cwd)) ?? 0}`;
+    const hit = memo?.get(key);
+    if (hit && hit.generation === generation && hit.expiresAt > Date.now()) return hit.value;
     let files = 0, bytes = 0;
     async function fileHash(file: string): Promise<string> {
       const info = await lstat(file);
@@ -67,7 +81,7 @@ export async function fingerprint(cwd: string, isolation: 'shared' | 'worktree',
       if (files > limits.maxFingerprintFiles || bytes > limits.maxFingerprintBytes) throw new Error('workspace exceeds fingerprint limits');
       return hash(await readFile(file));
     }
-    try {
+    const value: Fingerprint = await (async () => { try {
       let workspace: string;
       if (repo) {
         const head = await git(repo, ['rev-parse', 'HEAD']);
@@ -86,6 +100,11 @@ export async function fingerprint(cwd: string, isolation: 'shared' | 'worktree',
       const extra: Record<string, string> = {};
       for (const file of inputs) extra[file] = await fileHash(path.resolve(cwd, file));
       return { cacheable: true, workspace, cacheInputs: extra };
-    } catch (error) { return { cacheable: false, reason: (error as Error).message, workspace: '', cacheInputs: {} }; }
+    } catch (error) { return { cacheable: false, reason: (error as Error).message, workspace: '', cacheInputs: {} }; } })();
+    if (memo && (limits.fingerprintTtlMs ?? 0) > 0) {
+      for (const [oldKey, entry] of memo) if (entry.expiresAt <= Date.now()) memo.delete(oldKey);
+      memo.set(key, { generation, expiresAt: Date.now() + limits.fingerprintTtlMs!, value });
+    }
+    return value;
   });
 }

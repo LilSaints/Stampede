@@ -125,11 +125,11 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     if (name === 'claim') {
       if (input.event === 'stop' && (a.markedDone || a.stopBlocks >= config.limits.maxStopBlocks)) return { messages: [] };
       const batch = await bus.claim(a.name, input.event === 'stop' ? 'stop-hook' : 'hook', a.turns.length, config.delivery.hookBatchMax, 24 * 1024);
-      if (batch.claimId) { c.tainted = true; if (input.event === 'stop') a.stopBlocks++; }
+      if (batch.claimId) { execution.sharedUse(a.name, input.event === 'stop' ? 'delivery:stop-hook' : 'delivery:hook'); if (input.event === 'stop') a.stopBlocks++; }
       return { ...batch, context: batch.messages.length ? envelopes(batch.messages, batch.deliveries, execution.peers) : '' };
     }
     validateTool(name, input, 'agent');
-    if (!['whoami', 'mark_done'].includes(name)) c.tainted = true;
+    if (!['whoami', 'mark_done'].includes(name)) execution.sharedUse(a.name, name, ['send_message', 'post_finding'].includes(name));
     if (name === 'whoami') return { name: a.name, role: a.role, backend: a.backend, runId: a.runId, team: a.teamId, canMessage: a.comms.canMessage === '*' ? [...execution.peers.keys(), 'orchestrator'].filter(n => n !== a.name) : a.comms.canMessage };
     if (name === 'list_agents') return { agents: [...execution.peers.values()].filter(p => p.name === a.name || a.comms.canMessage === '*' || a.comms.canMessage.includes(p.name)).map(p => ({ ...p, unreadFromMe: bus.deliveries.filter(d => d.recipient === p.name && d.state !== 'committed' && bus.messages.find(m => m.seq === d.seq)?.from === a.name).length })).concat([{ name: 'orchestrator', backend: 'claude', comms: true, canMessage: '*', status: 'running', markedDone: false, turn: 0, unreadFromMe: 0 }]) };
     if (name === 'send_message') return bus.send(a.name, input.to, input.text, input.replyTo);
