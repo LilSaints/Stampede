@@ -76,6 +76,7 @@ test('installed Workflow reference review, dry-loop and judge-panel patterns run
         assert.equal(run.status, 'completed', JSON.stringify(run.error));
         assert.deepEqual(run.result, expected); assert.equal(run.agents.length, count);
         assert.ok(run.agents.every(a => a.status === 'done' && a.backend === backend));
+        assert.ok(run.agents.every(a => !a.phase || run.phases.some(phase => phase.title === a.phase)), 'explicit agent phases must be visible in the pane');
         if (script === panel) assert.deepEqual(run.agents.map(a => a.phase), ['Design','Design','Design','Judge','Judge','Judge','Synthesize']);
         if (script === review) assert.deepEqual(run.agents.filter(a => a.phase === 'Verify').map(a => a.label).sort(), ['verify:a.ts','verify:b.ts']);
       }

@@ -156,6 +156,9 @@ export class RunExecution {
   readonly unavailable = new Set<string>();
   task?: Promise<void>;
   runtime?: ReturnType<typeof executeWorkflow>;
+  private readonly childRuntimes = new Set<ReturnType<typeof executeWorkflow>>();
+  private readonly childAborts = new Set<AbortController>();
+  private readonly childTasks = new Set<Promise<unknown>>();
   draining = false;
   private cancellation?: Promise<void>;
   constructor(readonly manager: RunManager, readonly run: Run, readonly config: Config) {
@@ -197,6 +200,9 @@ export class RunExecution {
     } catch (error) {
       if (!runTerminal(this.run.status)) { this.run.error = { message: (error as Error).message, stack: (error as Error).stack }; await this.cancel('failed'); }
     } finally {
+      this.draining = true;
+      for (const controller of this.childAborts) controller.abort();
+      await Promise.allSettled(this.childTasks);
       await this.cancellation;
       await Promise.allSettled([...this.teams.values()].map(team => team.admission));
       await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
@@ -204,21 +210,30 @@ export class RunExecution {
       for (const c of this.contexts.values()) { c.token = ''; for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.agentDir(c.agent), file), { force: true }); }
     }
   }
-  async call(method: string, params: any, nesting = 0): Promise<any> {
-    if (this.abort.signal.aborted) throw new Error('run cancelled');
-    if (method === 'agent') { const c = this.prepare(params.prompt, params.opts ?? {}); c.task = this.dispatch(c); void c.task.catch(e => this.fail(e)); return c.done; }
-    if (method === 'phase') { this.run.phase = params.title; if (!this.run.phases.some(p => p.title === params.title)) this.run.phases.push({ title: params.title }); await this.event('phase', params); return; }
+  async call(method: string, params: any, nesting = 0, group?: string): Promise<any> {
+    if (this.abort.signal.aborted || this.draining || runTerminal(this.run.status)) throw new Error('run cancelled');
+    const phase = (title?: string) => group ? group + (title ? ' / ' + title : '') : title;
+    if (method === 'agent') { const opts = params.opts ?? {}; const c = this.prepare(params.prompt, { ...opts, phase: phase(opts.phase) }); c.task = this.dispatch(c); void c.task.catch(e => this.fail(e)); return c.done; }
+    if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
     if (method === 'log') { this.run.log.push(params.message); this.run.log = this.run.log.slice(-100); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
     if (method === 'board' || method === 'team.board') return this.bus.entries.filter(e => !params.topic || e.topic === params.topic);
-    if (method === 'spawnTeam') return this.spawnTeam(params.members, params.opts ?? {});
+    if (method === 'spawnTeam') {
+      const opts = params.opts ?? {};
+      return this.spawnTeam(group ? params.members.map((member: any) => ({ ...member, phase: phase(member.phase ?? opts.phase) })) : params.members, { ...opts, phase: phase(opts.phase) });
+    }
     if (method.startsWith('team.')) return this.teamCall(method.slice(5), params);
     if (method === 'workflow') {
       if (nesting) throw new Error('nested workflow() is unavailable');
       const input = typeof params.ref === 'string' ? { name: params.ref } : params.ref;
       const source = await this.manager.source(input, this.run.cwd);
-      const child = executeWorkflow({ source, args: params.args, budgetTokens: this.run.budget.totalTokens, signal: this.abort.signal, cpuBlockMs: this.config.limits.scriptCpuBlockMs, call: (m, p) => { child.setSpent(this.run.budget.spentTokens); return this.call(m, p, 1); } });
-      child.setSpent(this.run.budget.spentTokens); return child.result;
+      if (this.draining || this.abort.signal.aborted || runTerminal(this.run.status)) throw new Error('run cancelled');
+      const childGroup = '▸ ' + (input.name ?? parseWorkflow(source).meta.name);
+      const controller = new AbortController(); this.childAborts.add(controller);
+      const child = executeWorkflow({ source, args: params.args, budgetTokens: this.run.budget.totalTokens, signal: AbortSignal.any([this.abort.signal, controller.signal]), cpuBlockMs: this.config.limits.scriptCpuBlockMs, call: (m, p) => this.call(m, p, 1, childGroup) });
+      this.childRuntimes.add(child); child.setSpent(this.run.budget.spentTokens);
+      const task = child.result.finally(() => { this.childRuntimes.delete(child); this.childAborts.delete(controller); this.childTasks.delete(task); });
+      this.childTasks.add(task); return task;
     }
     throw new Error(`unknown workflow hook ${method}`);
   }
@@ -244,8 +259,8 @@ export class RunExecution {
     if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
     if (opts.name && (!/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
-    const model = opts.model ?? this.config.codex.defaultModel;
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
+    const model = opts.model ?? (backend === 'codex' && opts.agentType ? this.config.codex.agentTypes[opts.agentType].model : undefined) ?? this.config.codex.defaultModel;
     if (backend === 'codex' && this.run.budget.totalUsd !== null && !this.config.pricing.codex?.[model]) throw new Error(`budgetUsd requires pricing for codex model ${model}`);
   }
   prepare(prompt: string, opts: AgentOpts, teamId?: string): AgentContext {
@@ -261,6 +276,7 @@ export class RunExecution {
     if (backend === 'codex' && enabled && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('Codex messaging is not qualified for this CLI version; run stampede doctor and qualify the updated backend');
     const canMessage = typeof opts.comms === 'object' ? opts.comms.canMessage ?? '*' : '*';
     const agent: Agent = { id: `agt_${ulid()}`, runId: this.run.id, name, label: opts.label ?? name, role: opts.role, phase: opts.phase ?? this.run.phase, backend, mode: 'oneshot', comms: { enabled, canMessage }, access, workspace: { kind: isolation, path: path.resolve(this.run.cwd, opts.cwd ?? '.') }, status: 'queued', markedDone: false, usage: zeroUsage(), resumes: 0, stopBlocks: 0, lastActivityAt: now(), turns: [], teamId };
+    if (agent.phase && !this.run.phases.some(phase => phase.title === agent.phase)) this.run.phases.push({ title: agent.phase });
     let resolve!: (value: unknown) => void; const done = new Promise(r => { resolve = r; });
     const token = randomBytes(32).toString('hex');
     const context: AgentContext = { agent, opts, prompt, abort: new AbortController(), token, tokenHash: hash(token), done, resolve, tainted: false, shared: { reads: [], writes: [] }, resumeScheduled: false, autoDone: typeof opts.comms === 'object' ? opts.comms.autoDoneOnIdle ?? !teamId : !teamId };
@@ -362,6 +378,7 @@ export class RunExecution {
       if (outcome.usage.usd !== null) { a.usage.usd = (a.usage.usd ?? 0) + outcome.usage.usd; this.run.budget.spentUsd += outcome.usage.usd; }
       this.run.budget.spentTokens += outcome.usage.outputTokens + (a.backend === 'codex' ? outcome.usage.reasoningTokens : 0);
       this.runtime?.setSpent(this.run.budget.spentTokens);
+      for (const child of this.childRuntimes) child.setSpent(this.run.budget.spentTokens);
       await this.event('agent.usage', { name: a.name, usage: outcome.usage, budget: this.run.budget });
       if (!this.budgetAvailable()) await this.event('budget.exhausted', this.run.budget);
       await this.bus.endTurn(a.name, n, outcome.ok);
