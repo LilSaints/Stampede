@@ -404,11 +404,12 @@ export class RunExecution {
       }
       const error = outcome.error ?? { kind: 'unknown', message: 'backend returned no result' }; a.error = error;
       if (['auth', 'spawn'].includes(error.kind)) await this.backendUnavailable(a.backend, error);
-      const maxAttempts = ['rate_limit', 'overloaded'].includes(error.kind) ? 6 : ['crash', 'unknown'].includes(error.kind) ? 3 : ['schema', 'timeout'].includes(error.kind) ? 2 : 1;
+      const limited = ['rate_limit', 'overloaded'].includes(error.kind);
+      if (limited) { this.manager.scheduler.rateLimited(a.backend); await this.event('scheduler.cooldown', { backend: a.backend }); }
+      const maxAttempts = limited ? 6 : ['crash', 'unknown'].includes(error.kind) ? 3 : ['schema', 'timeout'].includes(error.kind) ? 2 : 1;
       if (++attempts >= maxAttempts) { await this.finish(c, c.abort.signal.aborted ? 'cancelled' : 'failed'); return; }
-      if (['rate_limit', 'overloaded'].includes(error.kind)) this.manager.scheduler.rateLimited(a.backend);
       if (!a.comms.enabled) { c.release?.(a.id); c.release = undefined; }
-      if (['rate_limit', 'overloaded'].includes(error.kind)) { await this.event('scheduler.cooldown', { backend: a.backend }); await sleep(Math.min(120000, [5000, 15000, 45000][attempts - 1] ?? 120000) + parseInt(hash(a.id).slice(0, 4), 16) % 1000, c.abort.signal); }
+      if (limited) await sleep(Math.min(120000, [5000, 15000, 45000][attempts - 1] ?? 120000) + parseInt(hash(a.id).slice(0, 4), 16) % 1000, c.abort.signal);
       if (!a.comms.enabled) c.release = await this.manager.scheduler.acquire([this.slot(c)], c.abort.signal);
       kind = 'retry'; if (!resume) a.sessionId = undefined;
       prompt = initialPrompt;

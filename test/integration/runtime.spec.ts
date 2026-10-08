@@ -7,6 +7,37 @@ import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
 
 const meta = 'export const meta={name:"runtime acceptance",description:"fake backend checks"};\n';
+test('the last rate-limited attempt still cools down the backend', { timeout: 30000 }, async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-rate-limit-'));
+  const cwd = path.join(root, 'work'); await mkdir(cwd);
+  const config = defaults(); config.defaultBackend = 'codex';
+  const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-codex.mjs'), capabilities: {} };
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { available: false, capabilities: {} } } });
+  const timer = globalThis.setTimeout, waits: number[] = [];
+  let backoffPending = false;
+  hub.manager.on('event', event => { if (event.type === 'scheduler.cooldown') backoffPending = true; });
+  // Advance only retry backoff. Process timeouts, watchdogs and hub timers keep
+  // real time; actual fake workers still traverse the adapter/error path.
+  t.mock.method(globalThis, 'setTimeout', ((callback: (...args: any[]) => void, ms: number, ...args: any[]) => {
+    if (backoffPending && [5000, 15000, 45000, 120000].some(base => ms >= base && ms < base + 1000)) { backoffPending = false; waits.push(ms); return timer(callback, 0, ...args); }
+    return timer(callback, ms, ...args);
+  }) as typeof setTimeout);
+  try {
+    const started = await hub.manager.start({ cwd, script: meta + 'return await agent("rate-limit");' });
+    await hub.manager.active.get(started.runId)!.task;
+    const run = hub.manager.get(started.runId);
+    assert.equal(run.status, 'completed', JSON.stringify(run.error));
+    assert.equal(run.result, null);
+    assert.equal(run.agents[0].turns.length, 6);
+    assert.equal(run.agents[0].error?.kind, 'rate_limit');
+    assert.equal(hub.manager.events.filter(event => event.runId === run.id && event.type === 'scheduler.cooldown').length, 6);
+    assert.equal(waits.length, 5);
+    const jitter = waits[0] - 5000;
+    assert.deepEqual(waits, [5000, 15000, 45000, 120000, 120000].map(base => base + jitter));
+    assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
+  } finally { t.mock.restoreAll(); await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
+});
+
 test('USD admission and accounting use the effective agent-type model', { timeout: 20000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-budget-'));
   const cwd = path.join(root, 'work'); await mkdir(cwd);

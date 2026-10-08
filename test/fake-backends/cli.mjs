@@ -10,6 +10,7 @@ const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
 if (argv.includes('--version')) { console.log(process.argv[1].includes('claude') ? 'Claude Code 2.1.292' : 'codex-cli 0.159.2'); process.exit(0); }
 if (prompt === 'crash') { process.stderr.write('fixture crash'); process.exit(1); }
 if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 authentication failed' } }); process.exit(1); }
+if (prompt === 'rate-limit') { emit({ type: 'turn.failed', error: { message: '429 rate limit fixture' } }); process.exit(1); }
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
 if (/^fixture:recovery:[ab]$/.test(prompt)) {

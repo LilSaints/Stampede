@@ -51,3 +51,27 @@ test('project caps limit only that run and preserve cross-run throughput', async
   assert.equal(scheduler.snapshot().queued.length, 1);
   first(); const third = await waiting; second(); third(); other();
 });
+
+test('backend cooldown preserves held slots and restores queued capacity gradually', async () => {
+  const scheduler = new Scheduler({ ...config, global: 12, perRun: 12, codex: 8 });
+  const held = await Promise.all(slots(8, 'working', false).map(slot => scheduler.acquire([slot])));
+  const now = Date.now();
+  scheduler.rateLimited('codex', now);
+  const waiting = Array.from({ length: 3 }, (_, i) => scheduler.acquire(slots(1, `waiting-${i}`, false)));
+  assert.equal(scheduler.snapshot().held.length, 8, 'cooldown must never revoke active permits');
+  for (let i = 0; i < 4; i++) held[i]();
+  assert.equal(scheduler.snapshot().queued.length, 3, 'new starts wait until below the halved cap');
+  held[4]();
+  const releases = [await waiting[0]];
+  assert.equal(scheduler.snapshot().held.length, 4);
+  scheduler.tick(now + 59999);
+  assert.equal(scheduler.snapshot().queued.length, 2);
+  scheduler.tick(now + 60000);
+  releases.push(await waiting[1]);
+  assert.equal(scheduler.snapshot().held.length, 5);
+  scheduler.tick(now + 90000);
+  releases.push(await waiting[2]);
+  assert.equal(scheduler.snapshot().held.length, 6);
+  [...held, ...releases].forEach(release => release());
+  assert.equal(scheduler.snapshot().held.length, 0);
+});
