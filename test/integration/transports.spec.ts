@@ -78,7 +78,9 @@ test('four mixed workers use real MCP for 600 ordered deliveries, then reserve p
     assert.equal(deliveries.length, 600); assert.ok(deliveries.every(d => d.state === 'committed'));
     const waiting = await hub.manager.start({ cwd, args: { members: members.map(({ schema: _, ...member }) => ({ ...member, prompt: 'fixture:wait' })) }, script: meta + 'const t=await spawnTeam(args.members); const quiet=await t.untilQuiet({idleMs:50,maxMs:15000}); const reserved=await agent("reserve survived"); await t.stop(); return {quiet,reserved};' });
     await hub.manager.active.get(waiting.runId)!.task;
-    const progress = hub.manager.get(waiting.runId).result as any;
+    const waitingRun = hub.manager.get(waiting.runId);
+    assert.equal(waitingRun.status, 'completed', JSON.stringify({ error: waitingRun.error, agents: waitingRun.agents.map(a => ({ name: a.name, status: a.status, error: a.error })) }));
+    const progress = waitingRun.result as any;
     assert.equal(progress.quiet.reason, 'deadlock'); assert.equal(progress.reserved, 'reserve survived');
     assert.equal(hub.manager.scheduler.snapshot().held.length, 0);
     const idle = await hub.manager.start({ cwd, script: meta + 'await spawnTeam([{name:"sleeper",prompt:"idle"}]); await new Promise(()=>{});' });

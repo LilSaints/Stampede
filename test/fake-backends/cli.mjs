@@ -13,6 +13,11 @@ if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 auth
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
 let scenarioOutput;
+if (prompt.startsWith('Adversarially verify: fixture-')) scenarioOutput = JSON.stringify({ isReal: prompt.endsWith('fixture-real') });
+const referenceJudge = /^Judge "(fixture-real|fixture-rejected)" via the (correctness|security|repro) lens/.exec(prompt);
+if (referenceJudge) scenarioOutput = JSON.stringify({ real: referenceJudge[1] === 'fixture-real' && referenceJudge[2] !== 'repro' });
+const designJudge = /^Score fixture design ([ABC])$/.exec(prompt);
+if (designJudge) scenarioOutput = JSON.stringify({ score: { A: 7, B: 10, C: 9 }[designJudge[1]] });
 if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
