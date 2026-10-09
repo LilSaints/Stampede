@@ -42,18 +42,24 @@ export class HubClient {
     const hub = await readJson<{ port: number; version: string }>(path.join(this.home, 'hub.json'));
     if (!hub) throw new Error('hub not running');
     if (!Number.isInteger(hub.port) || hub.port < 1 || hub.port > 65535) throw new Error('invalid hub port');
-    if (hub.version !== VERSION) throw new Error(`blocked: hub version ${hub.version}, shim version ${VERSION}; run 'stampede hub --restart' after runs finish`);
-    this.url = `http://127.0.0.1:${hub.port}`;
-    this.token = (await readFile(path.join(this.home, 'hub.token'), 'utf8')).trim();
+    const url = `http://127.0.0.1:${hub.port}`, token = (await readFile(path.join(this.home, 'hub.token'), 'utf8')).trim();
+    // The descriptor outlives its hub, which leaves it behind on exit: only a
+    // hub that answers counts, and its own version decides, so a stopped older
+    // hub is no hub (one is started) while a live one still blocks.
+    const health = await fetch(url + '/health', { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) })
+      .then(response => response.ok ? response.json() as Promise<{ version?: string }> : undefined, () => undefined);
+    if (!health) throw new Error('hub not running');
+    if (health.version !== VERSION) throw new Error(`blocked: hub version ${health.version}, shim version ${VERSION}; run 'stampede hub --restart' after runs finish`);
+    this.url = url; this.token = token;
   }
   async connect(autoStart = true) {
     if (this.role === 'agent') return;
-    try { await this.discover(); await this.request('/health', undefined, false); return; }
+    try { await this.discover(); return; }
     catch (error) { if ((error as Error).message.startsWith('blocked:') || !autoStart) throw error; }
     await launchHub(this.cliEntry, this.home);
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
-      try { await this.discover(); await this.request('/health', undefined, false); return; } catch (error) { if ((error as Error).message.startsWith('blocked:')) throw error; }
+      try { await this.discover(); return; } catch (error) { if ((error as Error).message.startsWith('blocked:')) throw error; }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw new Error('hub failed to start within 10 seconds; run stampede doctor');

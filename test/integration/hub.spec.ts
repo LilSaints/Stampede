@@ -248,3 +248,24 @@ test('on Windows a hub the shim starts is created outside the shim\'s process tr
     await rm(root, { recursive: true, force: true, maxRetries: 5 });
   }
 });
+test('a stopped older hub\'s descriptor does not block starting a hub; a live hub of another version still does', { timeout: 60000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-stale-'));
+  const home = path.join(root, 'state'); await mkdir(home, { recursive: true });
+  // A live hub of another version answers /health with its own version.
+  const { createServer } = await import('node:http');
+  const older = createServer((_request, response) => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: true, version: '0.0.1' })); });
+  await new Promise<void>(resolve => older.listen(0, '127.0.0.1', resolve));
+  await writeFile(path.join(home, 'hub.json'), JSON.stringify({ pid: 1, port: (older.address() as any).port, version: '0.0.1' }));
+  await writeFile(path.join(home, 'hub.token'), 'older-token');
+  const client = new HubClient(home, path.resolve('dist/cli.js'), 'orchestrator');
+  await assert.rejects(client.connect(false), /blocked: hub version 0\.0\.1/);
+  // Stopped, it leaves the same descriptor behind, which no longer stands for a hub: one is started.
+  await new Promise(resolve => older.close(resolve));
+  await client.connect(true);
+  try { assert.notEqual((await readJson<{ version: string }>(path.join(home, 'hub.json')))!.version, '0.0.1'); }
+  finally {
+    await client.request('/v1/hub/shutdown', {}).catch(() => {});
+    for (let i = 0; i < 100 && await readJson(path.join(home, 'hub.lock')); i++) await new Promise(r => setTimeout(r, 100));
+    await rm(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
