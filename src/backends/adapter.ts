@@ -10,6 +10,8 @@ export interface AgentLaunch {
   hubUrl: string; token?: string; cliEntry: string;
   windowsSandbox: string; timeoutMs: number; stdoutPath: string; stderrPath: string;
   inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number; persistNonComms?: boolean;
+  /** Claude tools removed beyond the recursion tools; `skills: false` also removes skills and custom commands. */
+  denyTools?: string[]; skills?: boolean;
   disableHooks?: boolean; extraEnv?: Record<string, string>; mcpEnv?: Record<string, string>;
   /** Codex's approvals_reviewer ("user", "auto_review"); Codex's own default without one. */
   approvalsReviewer?: string;

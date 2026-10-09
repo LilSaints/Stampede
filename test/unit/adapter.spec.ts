@@ -7,6 +7,7 @@ import { codexArgv } from '../../src/backends/codex.js';
 import { claudeArgv } from '../../src/backends/claude.js';
 import { launchTurn, workerEnv } from '../../src/backends/procs.js';
 import type { AgentLaunch } from '../../src/backends/adapter.js';
+import { defaults } from '../../src/hub/config.js';
 function launch(dir: string): AgentLaunch { return { backend: 'codex', binary: process.execPath, entry: path.resolve('test/fake-backends/cli.mjs'), cwd: dir, access: 'read-only', model: 'fixture', effort: 'low', mcpPath: '', settingsPath: '', contract: 'fixture', comms: false, hubUrl: '', cliEntry: '', windowsSandbox: 'elevated', timeoutMs: 3000, stdoutPath: path.join(dir, 'stdout.jsonl'), stderrPath: path.join(dir, 'stderr.txt') }; }
 test('Codex resume preserves all options before the resume tail', () => {
   const a = { ...launch('.'), comms: true, token: 'test-token' };
@@ -29,6 +30,20 @@ test('Claude read-only coordination permits messaging without file edits or shel
   for (const tool of ['Edit', 'Write', 'Bash', 'PowerShell', 'Agent', 'Task']) assert.ok(denied.includes(tool));
   assert.ok(!claudeArgv({ ...launch('.'), comms: true, persistNonComms: false }).includes('--no-session-persistence'));
   assert.ok(claudeArgv({ ...launch('.'), comms: false, persistNonComms: false }).includes('--no-session-persistence'));
+});
+test('Claude workers never get Workflow; configured tools and skills are removed at every access level', () => {
+  const denyTools = defaults().claude.denyTools;
+  for (const access of ['read-only', 'edit', 'full'] as const) {
+    const argv = claudeArgv({ ...launch('.'), backend: 'claude', access, denyTools });
+    const denied = argv.slice(argv.indexOf('--disallowedTools') + 1);
+    for (const tool of ['Agent', 'Task', 'TeamCreate', 'TeamDelete', 'Workflow', 'CronCreate', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree']) assert.ok(denied.includes(tool), `${access} denies ${tool}`);
+    const kept = ['Read', 'Glob', 'Grep', 'ToolSearch', 'SendMessage', 'ListAgents', 'StructuredOutput', ...(access === 'read-only' ? [] : ['Edit', 'Write']), ...(access === 'full' ? ['Bash', 'PowerShell'] : [])];
+    for (const tool of kept) assert.ok(!denied.includes(tool), `${access} keeps ${tool}`);
+    assert.ok(!argv.includes('--disable-slash-commands'));
+  }
+  const bare = claudeArgv({ ...launch('.'), backend: 'claude', access: 'full' });
+  assert.deepEqual(bare.slice(bare.indexOf('--disallowedTools') + 1), ['Agent', 'Task', 'TeamCreate', 'TeamDelete', 'Workflow']);
+  assert.ok(claudeArgv({ ...launch('.'), backend: 'claude', skills: false }).includes('--disable-slash-commands'));
 });
 test('a Codex turn that reconnects and completes succeeds; one whose stream is lost fails', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'stampede-reconnect-'));

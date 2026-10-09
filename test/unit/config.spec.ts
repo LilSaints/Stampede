@@ -21,6 +21,24 @@ test('home configuration cannot raise the Workflow per-run ceiling', async () =>
     await assert.rejects(loadConfig(home), /nonCommsReserve must fit every cap/);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
+test('Claude workers lose unused tools by default and keep skills unless configured', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stampede-config-'));
+  const write = (claude: object) => writeFile(path.join(home, 'config.json'), JSON.stringify({ claude }));
+  try {
+    const config = defaults();
+    assert.deepEqual(config.claude.denyTools, ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree', 'ExitWorktree']);
+    assert.equal(config.claude.skills, true);
+    await write({ denyTools: [], skills: false });
+    const trimmed = await loadConfig(home);
+    assert.deepEqual(trimmed.claude.denyTools, []); assert.equal(trimmed.claude.skills, false);
+    await write({ denyTools: ['Monitor', 'mcp__github__*', 'Bash(rm:*)'] });
+    assert.deepEqual((await loadConfig(home)).claude.denyTools, ['Monitor', 'mcp__github__*', 'Bash(rm:*)']);
+    await write({ denyTools: ['Monitor --dangerously-skip-permissions'] });
+    await assert.rejects(loadConfig(home), /invalid claude.denyTools entry/);
+    await write({ skills: 'no' });
+    await assert.rejects(loadConfig(home), /invalid claude.skills/);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
 test('the settings report warns of each default that stops a long coding agent', () => {
   const config = defaults();
   const report = settingsReport(config);

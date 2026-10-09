@@ -1,15 +1,17 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.6';
+export const VERSION = '1.0.0-rc.7';
 export const UI_API_VERSION = 1;
+/** Claude tools workers never need: scheduling, remote triggers, notifications, design sync and worktree switching. */
+export const WORKER_DENY_TOOLS = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree', 'ExitWorktree'];
 export function defaults() {
   const concurrency = Math.max(1, Math.min(16, os.cpus().length - 2, Math.floor(os.freemem() / (0.6 * 1024 ** 3))));
   return {
     defaultBackend: 'claude' as 'claude' | 'codex', allowFullAccess: false, allowUntestedVersions: false,
     hub: { idleShutdownMin: 30 },
     scheduler: { maxConcurrent: concurrency, perRun: Math.max(1, Math.min(16, os.cpus().length - 2)), claude: { maxConcurrent: 8 }, codex: { maxConcurrent: 6 }, nonCommsReserve: 1, admissionMaxMs: 600000 },
-    claude: { binary: null as string | null, settingSources: 'user,project,local', isolateUserHooks: false, inheritMcpServers: false, persistNonComms: true, editShellAllow: [] as string[] },
+    claude: { binary: null as string | null, settingSources: 'user,project,local', isolateUserHooks: false, inheritMcpServers: false, persistNonComms: true, editShellAllow: [] as string[], denyTools: [...WORKER_DENY_TOOLS] as string[], skills: true },
     codex: { entry: null as string | null, defaultModel: 'gpt-6-astra', defaultEffort: 'max', windowsSandbox: 'elevated', agentTypes: {} as Record<string, { developerInstructions: string; model?: string; effort?: string }>, disableUserHooks: false, approvalsReviewer: null as string | null },
     security: { ancestryCheck: process.platform !== 'darwin' },
     cache: { maxFingerprintFiles: 20000, maxFingerprintBytes: 536870912, fingerprintTtlMs: 2000 },
@@ -69,6 +71,7 @@ export function validateConfig(config: Config) {
   for (const key of ['turnTimeoutMs', 'scriptCpuBlockMs', 'drainMs'] as const) if (config.limits[key] <= 0) throw new Error(`limits.${key} must be positive`);
   for (const value of [config.hub.idleShutdownMin, config.ui.pollMs, config.ui.idlePollMs, config.delivery.claimLeaseMs]) if (value <= 0) throw new Error('timer intervals must be positive');
   if (config.codex.approvalsReviewer !== null && (typeof config.codex.approvalsReviewer !== 'string' || !/^[a-z_]{1,40}$/.test(config.codex.approvalsReviewer))) throw new Error('invalid codex.approvalsReviewer');
+  for (const tool of config.claude.denyTools) if (!/^[A-Za-z][\w*-]*(?:\(.+\))?$/.test(tool)) throw new Error(`invalid claude.denyTools entry: ${tool}`);
   if (!Array.isArray(config.claude.editShellAllow)) throw new Error('invalid editShellAllow');
   for (const rule of config.claude.editShellAllow) {
     if (typeof rule !== 'string' || !/^(Bash|PowerShell)\(.+\)$/.test(rule)) throw new Error(`invalid shell permission rule: ${rule}`);
