@@ -345,6 +345,10 @@ AgentOpts {
   cache?: 'auto'|'never';                  // default 'auto' (§16.4)
   cacheInputs?: string[];                  // extra files/dirs (relative to cwd) fingerprinted into the cache key (§16.4)
   appendSystemPrompt?: string;
+  env?: Record<string, string>;            // environment variables for the worker and the shells it runs, over the hub's own;
+                                           // at most 50, names [A-Za-z_][A-Za-z0-9_]*, never STAMPEDE_* or MCP_TOOL_TIMEOUT; in the cache key
+  locks?: string[];                        // hub-wide named locks this agent may take with the lock tool (§9), at most 10; for a resource
+                                           // only one worker may use at a time across agents and runs, such as a real desktop window
 }
 ```
 - Without `schema`: resolves to the agent's final text (string).
@@ -441,7 +445,7 @@ Team {
 
 ## 9. Agent-facing MCP tools (messaging)
 
-Exposed by `stampede mcp --role agent` to comms-enabled agents, which get every tool below, and to edit agents without comms that have a worktree or `scratch` folders, which get `cleanup` alone (`STAMPEDE_AGENT_TOOLS` lists the tools the shim shows; the hub refuses others). Other agents get no Stampede MCP server at all (zero overhead). Tool names are registered under server name `stampede`, so Claude sees `mcp__stampede__<tool>`; Codex sees its own prefixing (S-4).
+Exposed by `stampede mcp --role agent` to comms-enabled agents, which get every tool below, and to agents without comms that need a tool of their own: an edit agent with a worktree or `scratch` folders gets `cleanup`, and an agent whose call names `locks` gets `lock` and `unlock` (a comms agent gets those only under the same conditions; `STAMPEDE_AGENT_TOOLS` lists the tools the shim shows; the hub refuses others). Other agents get no Stampede MCP server at all (zero overhead). Tool names are registered under server name `stampede`, so Claude sees `mcp__stampede__<tool>`; Codex sees its own prefixing (S-4).
 
 All tools return JSON text content. Errors return `isError: true` with `{error: string, code: string}`.
 
@@ -457,6 +461,8 @@ All tools return JSON text content. Errors return `isError: true` with `{error: 
 | `post_finding` | `{title, body, topic?, data?}` | `{seq, id}` | Board append; also emits a `board.posted` event (shown in the mod's pane; not a message). |
 | `read_board` | `{topic?, sinceSeq?, max?: number /*≤50*/}` | `{entries: BoardEntry[], lastSeq}` | |
 | `cleanup` | `{paths: string[] /*1–50, absolute or relative to the worker's cwd*/}` | `{removed: string[], refused: [{path, reason}]}` | The hub deletes for the worker, whose sandbox may refuse recursive deletes: only inside its own worktree (never the worktree itself or its `.git`) and its `scratch` folders (those included). Each path's parent is resolved with every link and junction; a link is removed itself, never followed. A done agent's scratch folders are removed before its worktree is snapshot; a failed or cancelled one's stay. Scratch folders resolve against the workspace and may not be a filesystem root or hold the home folder, Stampede's home, the run's checkout or the workspace. One outside the workspace is created before the worker starts and made writable to an edit worker (Claude `--add-dir`, Codex `sandbox_workspace_write.writable_roots`). |
+| `lock` | `{name: string, waitSec?: number /*1–50, default 45*/}` | `{acquired: true}` or `{acquired: false, heldBy: string, since: string}` | A hub-wide named lock, across agents and runs, held in the hub's memory; `name` must be one of the call's `locks`. Waiters are served in the order they asked; on `acquired: false` the worker calls again. While blocked, agent status = `waiting`. A lock is taken back when its worker calls `unlock`, when its turn ends (a final answer, a crash, a retry, a cancel), and when the agent ends, each noted in the run log; a turn cut to deliver the orchestrator's message keeps it. A hub restart drops every lock. It is not a shared-state read: the call stays cacheable. |
+| `unlock` | `{name: string}` | `{released: boolean}` | Gives the lock to the next waiter; `false` when the worker did not hold it. |
 | `mark_done` | `{summary?: string}` | `{ok: true, reminder: string}` | Sets `markedDone=true` (§8.1): no resume on later messages. It does NOT complete the agent; the reminder tells it to end its turn now with its final answer (matching the schema, if any). Messages arriving after `markedDone` are recorded but never trigger a resume; senders see `markedDone: true`. |
 
 **Timeouts:** `wait_for_message.timeoutSec` max 50 s keeps every call under both clients' tool timeouts. Stampede's agent launch config MUST set the tool timeout explicitly: Claude via env `MCP_TOOL_TIMEOUT=120000` (S-2), Codex via `-c mcp_servers.stampede.tool_timeout_sec=120` (S-4).
@@ -583,7 +589,7 @@ MCP gives the server no way to wake its client; the **mod** does it instead (§2
 Every orchestrator tool is served by the hub as `POST /v1/orch/<tool_name>` with the same JSON input/output; the shim is a thin forwarder. The mod calls the same routes for its buttons (pause, cancel, skip, retry) plus UI-only routes that are NOT exposed as MCP tools (so they never consume model context):
 - `GET /v1/ui/snapshot` → `{hubSeq, runs: RunSummary[]}` for all non-terminal runs plus runs that ended in the last `ui.recentRunsMin` (default 60) minutes.
 - `GET /v1/ui/events?since=<hubSeq>&max=500` → `{hubSeq, events: UiEvent[], truncated: boolean}`; `truncated:true` tells the mod to re-fetch the snapshot.
-- `GET /v1/ui/transcript?runId=&agent=` → `{runId, agent, label, backend, model, status, entries, omitted}`: one agent's transcript across its turns, from each turn's saved prompt (`turn-N.prompt.txt`) and its stream (`turn-N.stdout.jsonl`, read on incrementally): `prompt`, `text` (its replies), `tool` (the tool and what it acted on), `error` and `turn` entries, the newest kept up to 40,000 characters (`omitted` counts the rest); subagent streams and thinking are left out.
+- `GET /v1/ui/transcript?runId=&agent=` → `{runId, agent, label, backend, model, status, entries, omitted}`: one agent's transcript across its turns, from each turn's saved prompt (`turn-N.prompt.txt`) and its stream (`turn-N.stdout.jsonl`, read on incrementally): `prompt`, `text` (its replies), `tool` (the tool and what it acted on; a shell call also its `command` and, when it succeeded, its `output`, and a Claude `Edit`, `MultiEdit` or `Write` its `diff` as unified hunks), `error` and `turn` entries, the newest kept up to 40,000 characters (`omitted` counts the rest); subagent streams and thinking are left out.
 `hubSeq` is a hub-wide monotonically increasing event counter (distinct from per-run message `seq`). Calls made by the mod do NOT advance any seen-cursor (the human looking at the pane is not Claude seeing it), except actions taken by the human, which the hub records as `orchestrator.action` events and includes in the next wake so Claude knows (e.g. "the user paused run X from the pane").
 
 ### 11.3 Tool descriptions and the skill

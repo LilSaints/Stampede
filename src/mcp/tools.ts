@@ -30,6 +30,8 @@ export const agentTools = [
   tool('post_finding', 'Append a finding to the shared board.', { title: string, body: string, topic: string, data: {} }, ['title', 'body']),
   tool('read_board', 'Read shared findings. Reading shared state makes your call dependent on this run.', { topic: string, sinceSeq: { type: 'integer', minimum: 0 }, max: { type: 'integer', minimum: 1, maximum: 50 } }, [], true, true),
   tool('mark_done', 'Declare coordination complete, then end your turn with the final answer. This tool does not itself return your result to the script.', { summary: string }, [], false, true),
+  tool('lock', 'Take a named lock your call was given, for a resource only one worker may use at a time (a real desktop window), across every agent and run. Waits up to waitSec (default 45) behind earlier askers; on acquired: false, call it again. Unlock as soon as the step that needs it ends; the hub also takes it back when your turn ends.', { name: string, waitSec: { type: 'number', minimum: 1, maximum: 50 } }, ['name']),
+  tool('unlock', 'Give back a lock you took with lock, so the next worker waiting for it gets it.', { name: string }, ['name'], false, true),
   tool('cleanup', 'Delete files or folders you made (fixtures, scratch output) inside your own worktree or your scratch folders; the hub deletes them, as your sandbox may refuse recursive deletes. Paths are absolute or relative to your working directory.', { paths: { type: 'array', items: string, minItems: 1, maxItems: 50 } }, ['paths'], false, true)
 ];
 const ajv = new Ajv({ strict: false });

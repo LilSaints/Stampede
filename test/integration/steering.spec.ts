@@ -104,6 +104,33 @@ test('the orchestrator steers workers without comms, answers checkpoints, passes
     assert.ok(codexArgs.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([away])}`));
     assert.ok(hub.manager.get(roots.runId).log.includes('away: removed 1 scratch folder'), 'the folder was made, then removed when the worker was done');
     assert.equal(await exists(away), false);
+    // A scratch folder the worker already deleted is not reported as kept.
+    const gone = path.join(root, 'gone', 'tmp');
+    const goneRun = await hub.manager.start({ cwd, script: meta + `return await agent(${JSON.stringify(`fixture:rm-scratch:${gone}`)}, { name: "gone", backend: "codex", access: "edit", scratch: [${JSON.stringify(gone)}] });` });
+    await hub.manager.active.get(goneRun.runId)?.task;
+    assert.equal(hub.manager.get(goneRun.runId).result, 'removed');
+    assert.ok(!hub.manager.get(goneRun.runId).log.some(line => line.startsWith('gone: removed')), 'nothing to remove, so no line');
+    // A worker takes a hub-wide lock its call names, waits behind another holder, and the hub takes it back when its turn ends.
+    const lockScript = meta + 'return await agent("fixture:lock:desktop-ui", { name: "prober", backend: "claude", locks: ["desktop-ui"] });';
+    assert.equal(await hub.manager.locks.acquire('desktop-ui', { id: 'other', label: 'other-agent (run_x)' }, 0), true);
+    const blocked = await hub.manager.start({ cwd, script: lockScript });
+    await hub.manager.active.get(blocked.runId)?.task;
+    const waited = JSON.parse(hub.manager.get(blocked.runId).result as string);
+    assert.deepEqual(waited.tools, ['lock', 'unlock']); assert.match(waited.refused, /not one this agent's call names/);
+    assert.equal(waited.lock.acquired, false); assert.equal(waited.lock.heldBy, 'other-agent (run_x)');
+    assert.equal(hub.manager.locks.release('desktop-ui', 'other'), true);
+    const locked = await hub.manager.start({ cwd, script: lockScript });
+    await hub.manager.active.get(locked.runId)?.task;
+    assert.equal(JSON.parse(hub.manager.get(locked.runId).result as string).lock.acquired, true);
+    assert.ok(hub.manager.get(locked.runId).log.includes('prober: released lock desktop-ui (its turn ended)'));
+    assert.equal(hub.manager.locks.holder('desktop-ui'), undefined);
+    // `env` reaches the worker; Stampede's own variables cannot be set.
+    const envRun = await hub.manager.start({ cwd, script: meta + 'return await agent("fixture:env:STAMPEDE_TEST_ENV_FREE", { name: "envy", backend: "claude", env: { STAMPEDE_TEST_ENV_FREE: "x" } });' });
+    await hub.manager.active.get(envRun.runId)?.task;
+    assert.match(String(hub.manager.get(envRun.runId).error?.message), /env cannot set STAMPEDE_TEST_ENV_FREE/);
+    const envOk = await hub.manager.start({ cwd, script: meta + 'return await agent("fixture:env:MSBUILDDISABLENODEREUSE", { name: "envy", backend: "claude", env: { MSBUILDDISABLENODEREUSE: "1" } });' });
+    await hub.manager.active.get(envOk.runId)?.task;
+    assert.equal(hub.manager.get(envOk.runId).result, '1');
 
     // A Claude agent type that lists its tools runs as a copy with the structured-output tool added; every Claude worker gets the inbox hooks.
     await mkdir(path.join(cwd, '.claude', 'agents'), { recursive: true });

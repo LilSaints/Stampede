@@ -640,7 +640,7 @@ for (const surface of ['terminal', 'desktop'] as const) test(`an agent's name op
   let state = { ...initialState(), stampedeHome: 'C:/fixture', hub: { ok: true, url: 'http://127.0.0.1:1234' }, runs: { owned: active }, ownedRunIds: ['owned'], openRuns: ['owned'] as string[] | null }, version = 0;
   const opened: { id: string; title?: string }[] = [], routes: string[] = [];
   const transcript = { runId: 'owned', agent: 'worker', label: 'Explore the shell', backend: 'codex', model: 'gpt-6.1-sol', status: 'running', omitted: 0, entries: [
-    { kind: 'prompt', text: 'Inventory the shell' }, { kind: 'tool', tool: 'Shell', text: 'rg --files src' }, { kind: 'text', text: 'Found **12** views.' }, { kind: 'error', text: 'exit 1: no such file' }] };
+    { kind: 'prompt', text: 'Inventory the shell' }, { kind: 'tool', tool: 'Shell', text: 'rg --files src', command: 'rg --files src', output: 'src/views/home.ts' }, { kind: 'text', text: 'Found **12** views.' }, { kind: 'error', text: 'exit 1: no such file' }] };
   on('state.get', () => ({ value: { value: state, version } }));
   on('state.set', (_$, event) => { state = event.value as typeof state; return { value: { isSet: true as const, version: ++version } }; });
   on('session.id', () => ({ value: 'owner' }));
@@ -664,7 +664,13 @@ for (const surface of ['terminal', 'desktop'] as const) test(`an agent's name op
   await click(pane, surface, 'fold-1', 'fold-1-row'); await pane.redraw();
   expect(state.transcripts?.['stampede-t-owned-worker']?.open).toEqual(['g1']);
   shown = JSON.stringify(await pane.drawn());
-  for (const text of ['"Shell"', 'rg --files src']) expect(shown.includes(text)).toBe(true);
+  for (const text of ['Shell', 'rg --files src']) expect(shown.includes(text)).toBe(true);
+  // A call opens on its command and what it printed, drawn as the chat draws code.
+  expect(shown.includes('src/views/home.ts')).toBe(false);
+  await click(pane, surface, 'call-1', 'call-1-row'); await pane.redraw();
+  expect(state.transcripts?.['stampede-t-owned-worker']?.open).toEqual(['g1', 'c1']);
+  shown = JSON.stringify(await pane.drawn());
+  expect(shown.includes('"type":"Code"')).toBe(true); expect(shown.includes('src/views/home.ts')).toBe(true);
   // A long prompt folds to its first lines until opened.
   const long = Array.from({ length: 20 }, (_, i) => `Line ${i} of the brief`).join('\n');
   state = { ...state, transcripts: { ...state.transcripts, 'stampede-t-owned-worker': { ...state.transcripts!['stampede-t-owned-worker']!, entries: [{ kind: 'prompt', text: long }] } } }; version++;
@@ -674,12 +680,13 @@ for (const surface of ['terminal', 'desktop'] as const) test(`an agent's name op
   expect(shown.includes('Show less')).toBe(true); expect(shown.includes('Line 19')).toBe(true);
   await pane.unmount();
 });
-test('a run of tool calls reads as the desktop folds it, with its errors kept in order', async () => {
-  const entries = [{ kind: 'text', text: 'Looking.' }, { kind: 'tool', tool: 'Shell', text: 'git status' }, { kind: 'error', text: 'exit 1: no' }, { kind: 'tool', tool: 'Read', text: 'C:/x/brief.md' }, { kind: 'tool', tool: 'Grep', text: 'foo' }, { kind: 'tool', tool: 'Shell', text: 'npm test' }, { kind: 'text', text: 'Done.' }, { kind: 'error', text: 'turn failed' }] as const;
+test('a turn\'s work folds into one line, its remarks and errors kept in order, and its reply stays open', async () => {
+  const entries = [{ kind: 'text', text: 'Looking.' }, { kind: 'tool', tool: 'Shell', text: 'git status' }, { kind: 'error', text: 'exit 1: no' }, { kind: 'tool', tool: 'Read', text: 'C:/x/brief.md' }, { kind: 'text', text: 'Now the search.' }, { kind: 'tool', tool: 'Grep', text: 'foo' }, { kind: 'tool', tool: 'Shell', text: 'npm test' }, { kind: 'text', text: 'Done.' }, { kind: 'error', text: 'turn failed' },
+    { kind: 'turn', text: 'Turn 2 · retry' }, { kind: 'prompt', text: 'Again' }, { kind: 'text', text: 'Only a reply.' }] as const;
   const items = transcriptItems([...entries], 10);
-  expect(items.map(item => [item.kind, item.at])).toEqual([['text', 10], ['tools', 11], ['text', 16], ['error', 17]]);
-  const group = items[1] as Extract<typeof items[number], { kind: 'tools' }>;
-  expect(group.lines.map(line => line.kind)).toEqual(['tool', 'error', 'tool', 'tool', 'tool']);
+  expect(items.map(item => [item.kind, item.at])).toEqual([['tools', 10], ['text', 17], ['error', 18], ['turn', 19], ['prompt', 20], ['text', 21]]);
+  const group = items[0] as Extract<typeof items[number], { kind: 'tools' }>;
+  expect(group.lines.map(line => line.kind)).toEqual(['text', 'tool', 'error', 'tool', 'text', 'tool', 'tool']);
   expect(toolSummary(group.lines)).toBe('Ran 2 commands, read brief.md, searched code');
   expect(toolSummary([{ kind: 'tool', tool: 'Edit', text: 'a.ts, b.ts' }, { kind: 'tool', tool: 'Write', text: 'src/run5_args.py' }])).toBe('Edited 2 files, wrote run5_args.py');
 });

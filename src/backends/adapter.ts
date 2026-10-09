@@ -9,7 +9,7 @@ export interface AgentLaunch {
   writableDirs?: string[];
   schema?: Schema; schemaPath?: string; lastMessagePath?: string;
   mcpPath: string; settingsPath: string; contract: string; comms: boolean;
-  /** The Stampede tools the worker gets: every one with comms, else at most `cleanup`; none, no Stampede server. */
+  /** The Stampede tools the worker gets: every one with comms, else at most `cleanup`, `lock` and `unlock`; none, no Stampede server. */
   mcpTools?: string[];
   /** A file of Claude agent definitions (`--agents`): the agent type copied with the tools it needs added. */
   agentsPath?: string;

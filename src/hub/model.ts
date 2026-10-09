@@ -17,6 +17,10 @@ export interface AgentOpts {
   baseRef?: string | { agent: string };
   /** Folders this agent may use for scratch files: it may delete inside them (the cleanup tool), and they are removed when it is done. Relative to its workspace. */
   scratch?: string[];
+  /** Environment variables for the worker and the shells it runs, over the hub's own. Part of the cache key. */
+  env?: Record<string, string>;
+  /** Hub-wide locks this agent may take with the lock tool, for a resource only one worker may use at a time (a real desktop window). */
+  locks?: string[];
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';

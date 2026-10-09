@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.11';
+export const VERSION = '1.0.0-rc.12';
 export const UI_API_VERSION = 1;
 /** Claude tools workers never need: scheduling, remote triggers, notifications, design sync and worktree switching. */
 export const WORKER_DENY_TOOLS = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree', 'ExitWorktree'];

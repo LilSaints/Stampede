@@ -166,7 +166,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     if (!found) throw Object.assign(new Error('unauthorized agent'), { statusCode: 401 });
     const { execution, c } = found; const a = c.agent; const bus = execution.bus;
     // Every agent reads its inbox (the hooks' claim); one without comms has cleanup at most, where it has somewhere to clean.
-    if (!a.comms.enabled && !['claim', 'claim-ack', ...(c.cleanupRoots?.length ? ['cleanup'] : [])].includes(name)) throw Object.assign(new Error('this agent has no Stampede messaging tools: start it with comms: true'), { statusCode: 403 });
+    if (!a.comms.enabled && !['claim', 'claim-ack', ...(c.cleanupRoots?.length ? ['cleanup'] : []), ...(c.opts.locks?.length ? ['lock', 'unlock'] : [])].includes(name)) throw Object.assign(new Error('this agent has no Stampede messaging tools: start it with comms: true'), { statusCode: 403 });
     if (name === 'claim-ack') { if (typeof input.claimId !== 'string') throw new Error('claimId required'); return { ok: await bus.ack(a.name, input.claimId) }; }
     if (name === 'claim') {
       if (input.event === 'stop' && (a.markedDone || a.stopBlocks >= config.limits.maxStopBlocks)) return { messages: [] };
@@ -175,6 +175,20 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       return { ...batch, context: batch.messages.length ? envelopes(batch.messages, batch.deliveries, execution.peers) : '' };
     }
     validateTool(name, input, 'agent');
+    // A lock orders the agent's own steps: it reads and writes nothing the result depends on.
+    if (name === 'lock' || name === 'unlock') {
+      if (!c.opts.locks?.includes(input.name)) throw Object.assign(new Error(`lock ${input.name} is not one this agent's call names (locks: ${(c.opts.locks ?? []).join(', ') || 'none'})`), { statusCode: 403 });
+      if (name === 'unlock') return { released: manager.locks.release(input.name, a.id) };
+      await execution.status(c, 'waiting');
+      try {
+        const stop = AbortSignal.any([signal, c.abort.signal]);
+        const acquired = await manager.locks.acquire(input.name, { id: a.id, label: `${a.name} (${a.runId})` }, (input.waitSec ?? 45) * 1000, stop);
+        // Granted as the worker went away: nobody would ever unlock it.
+        if (acquired && stop.aborted) { manager.locks.release(input.name, a.id); throw new Error('the lock request was abandoned'); }
+        const holder = manager.locks.holder(input.name);
+        return acquired ? { acquired: true } : { acquired: false, heldBy: holder?.label ?? null, since: holder?.since ?? null };
+      } finally { if (a.status === 'waiting') await execution.status(c, 'running'); }
+    }
     if (!['whoami', 'mark_done'].includes(name)) execution.sharedUse(a.name, name, ['send_message', 'post_finding'].includes(name));
     if (name === 'whoami') return { name: a.name, role: a.role, backend: a.backend, runId: a.runId, team: a.teamId, canMessage: a.comms.canMessage === '*' ? [...execution.peers.keys(), 'orchestrator'].filter(n => n !== a.name) : a.comms.canMessage };
     if (name === 'list_agents') return { agents: [...execution.peers.values()].filter(p => p.name === a.name || a.comms.canMessage === '*' || a.comms.canMessage.includes(p.name)).map(p => ({ ...p, unreadFromMe: bus.deliveries.filter(d => d.recipient === p.name && d.state !== 'committed' && bus.messages.find(m => m.seq === d.seq)?.from === a.name).length })).concat([{ name: 'orchestrator', backend: 'claude', comms: true, canMessage: '*', status: 'running', markedDone: false, turn: 0, unreadFromMe: 0 }]) };

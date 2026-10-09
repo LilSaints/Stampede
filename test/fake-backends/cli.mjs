@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
@@ -68,12 +68,16 @@ if (prompt === 'fixture:steer' && codex) {
 if (prompt === 'fixture:slow') { await new Promise(resolve => setTimeout(resolve, 1500)); scenarioOutput = 'slow done'; }
 // The worker's own argv, for a test to inspect how the hub launched it.
 if (prompt === 'fixture:argv') scenarioOutput = JSON.stringify({ argv });
+// One variable of the worker's environment, for a test of `env`.
+if (prompt.startsWith('fixture:env:')) scenarioOutput = process.env[prompt.slice('fixture:env:'.length)] ?? 'unset';
+// A worker that deletes its own scratch folder before it is done.
+if (prompt.startsWith('fixture:rm-scratch:')) { await rm(prompt.slice('fixture:rm-scratch:'.length), { recursive: true, force: true }); scenarioOutput = 'removed'; }
 if (prompt.startsWith('Adversarially verify: fixture-')) scenarioOutput = JSON.stringify({ isReal: prompt.endsWith('fixture-real') });
 const referenceJudge = /^Judge "(fixture-real|fixture-rejected)" via the (correctness|security|repro) lens/.exec(prompt);
 if (referenceJudge) scenarioOutput = JSON.stringify({ real: referenceJudge[1] === 'fixture-real' && referenceJudge[2] !== 'repro' });
 const designJudge = /^Score fixture design ([ABC])$/.exec(prompt);
 if (designJudge) scenarioOutput = JSON.stringify({ score: { A: 7, B: 10, C: 9 }[designJudge[1]] });
-if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt.startsWith('fixture:recovery:') || prompt === 'fixture:wait' || prompt === 'fixture:read-board' || prompt.startsWith('fixture:cleanup:')) {
+if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt.startsWith('fixture:recovery:') || prompt === 'fixture:wait' || prompt === 'fixture:read-board' || prompt.startsWith('fixture:cleanup:') || prompt.startsWith('fixture:lock:')) {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
   const server = codex
@@ -97,6 +101,13 @@ if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || p
       await mkdir(path.join(scratch, 'junk'), { recursive: true }); await writeFile(path.join(scratch, 'junk', 'a.txt'), 'fixture');
       const { tools } = await client.listTools();
       scenarioOutput = JSON.stringify({ tools: tools.map(t => t.name), ...await tool('cleanup', { paths: [path.join(scratch, 'junk'), outside] }) });
+    }
+    else if (prompt.startsWith('fixture:lock:')) {
+      // Takes a lock and leaves it for the hub to take back when the turn ends; a name its call did not give is refused.
+      const name = prompt.slice('fixture:lock:'.length);
+      const { tools } = await client.listTools();
+      let refused = null; try { await tool('lock', { name: 'not-mine' }); } catch (error) { refused = error.message; }
+      scenarioOutput = JSON.stringify({ tools: tools.map(t => t.name), lock: await tool('lock', { name, waitSec: 1 }), refused });
     }
     else if (prompt === 'fixture:wait') await tool('wait_for_message', { timeoutSec: 45 });
     else if (prompt.startsWith('fixture:burst')) {

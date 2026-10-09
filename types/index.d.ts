@@ -24,8 +24,8 @@ export interface StampedeUiState {
   /** The run whose Stop is asking to confirm. */
   cancelConfirm: string | false;
   expandedPhases?: Record<string, boolean>;
-  /** Agents' transcripts open in panes of their own, by pane id, as the hub last gave them; `open` names the folds expanded (`g<entry>` a tool group, `p<entry>` a long prompt). */
-  transcripts?: Record<string, { runId: string; agent: string; title: string; backend: string; model: string | null; status: string; entries: { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string }[]; omitted: number; fetched: boolean; open?: string[] }>;
+  /** Agents' transcripts open in panes of their own, by pane id, as the hub last gave them; `open` names the folds expanded (`g<entry>` a tool group, `c<entry>` one call, `p<entry>` a long prompt). A call may carry its command, output and edit hunks. */
+  transcripts?: Record<string, { runId: string; agent: string; title: string; backend: string; model: string | null; status: string; entries: { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string; command?: string; output?: string; diff?: string }[]; omitted: number; fetched: boolean; open?: string[] }>;
   dismissedRuns?: string[];
   finishedCollapsed?: boolean;
   actionPending: boolean;

@@ -195,16 +195,30 @@ export function gridCells(states: (Cell | 'ghost')[], columns: number) {
   states.forEach((state, i) => words.set([state === 'pending' || state === 'ghost' ? 0x25a1 : 0x25a0, RGB[state], 0x01000000], (Math.floor(i / perRow) * width + (i % perRow) * 2) * 3));
   return { columns: width, rows, cells: (new Uint8Array(words.buffer) as any).toBase64() as string };
 }
-type TranscriptEntry = { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string };
-/** A transcript as the desktop draws a conversation: each run of tool calls, with the errors among them, folds into one item. */
-export type TranscriptItem = { kind: 'prompt' | 'text' | 'error' | 'turn'; text: string; at: number } | { kind: 'tools'; lines: { kind: 'tool' | 'error'; tool?: string; text: string }[]; at: number };
+type TranscriptEntry = { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string; command?: string; output?: string; diff?: string };
+/** One call, error or passing remark of a folded group; `at` is its entry's index, the key of its own fold. */
+export type ToolLine = { kind: 'tool' | 'error' | 'text'; tool?: string; text: string; command?: string; output?: string; diff?: string; at: number };
+/**
+ * A transcript folded to what a reader needs: each turn's prompt, then one
+ * line for all its work ("Ran 12 commands, edited 3 files · 2 errors"), then
+ * the reply it ended on. The work holds the tool calls, the errors among them
+ * and the remarks the worker made between calls, and opens on them in order.
+ */
+export type TranscriptItem = { kind: 'prompt' | 'text' | 'error' | 'turn'; text: string; at: number } | { kind: 'tools'; lines: ToolLine[]; at: number };
 /** `at` is the entry's index in the whole transcript (`base` the entries the hub left out), so a fold keeps its key as entries are dropped. */
 export function transcriptItems(entries: TranscriptEntry[], base = 0): TranscriptItem[] {
   const items: TranscriptItem[] = [];
+  // A remark is one a tool call follows before the turn ends: the last text of a turn is its reply.
+  const remark: boolean[] = []; let callAhead = false;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const kind = entries[i]!.kind;
+    if (kind === 'prompt' || kind === 'turn') callAhead = false; else if (kind === 'tool') callAhead = true;
+    remark[i] = kind === 'text' && callAhead;
+  }
   entries.forEach((entry, i) => {
     const last = items.at(-1);
-    if (entry.kind === 'tool' || entry.kind === 'error' && last?.kind === 'tools') {
-      const line = { kind: entry.kind, ...(entry.tool ? { tool: entry.tool } : {}), text: entry.text };
+    if (entry.kind === 'tool' || remark[i] || entry.kind === 'error' && last?.kind === 'tools') {
+      const { kind, ...rest } = entry, line: ToolLine = { ...rest, kind: kind as ToolLine['kind'], at: base + i };
       if (last?.kind === 'tools') last.lines.push(line); else items.push({ kind: 'tools', lines: [line], at: base + i });
     } else items.push({ kind: entry.kind as 'prompt' | 'text' | 'error' | 'turn', text: entry.text, at: base + i });
   });
@@ -238,6 +252,8 @@ export function toolSummary(lines: { kind: string; tool?: string; text: string }
   const text = [...kinds].map(([kind, subjects]) => toolPhrase(kind, subjects)).join(', ');
   return text ? text[0]!.toUpperCase() + text.slice(1) : 'Used tools';
 }
+/** How a shell call's command is highlighted; Codex's `Shell` names no shell. */
+const SHELL_LANGUAGE: Record<string, string> = { Bash: 'bash', PowerShell: 'powershell' };
 /** A long prompt folds to its first lines. */
 const PROMPT_LINES = 8, PROMPT_CHARS = 480;
 const foldPrompt = (text: string) => { const head = text.split('\n').slice(0, PROMPT_LINES).join('\n'); return head.length > PROMPT_CHARS ? head.slice(0, PROMPT_CHARS).trimEnd() + '…' : head.length < text.length ? head + '…' : head; };
@@ -677,9 +693,9 @@ export const register: Register = (on, options) => {
         : <Box><Button key={`fold-${at}`} plain dimColor onPress={() => { void toggleFold($, paneId, name); }}>{`${label}${failed} ${isOpen ? '▾' : '▸'}`}</Button></Box>;
     };
     // As the desktop draws a conversation: the prompt in an outlined box
-    // (folded to its first lines when long), replies as markdown, each run of
-    // tool calls folded into one dim line ("Ran 3 commands, read brief.md")
-    // that opens on the calls and their errors, a lone error in red.
+    // (folded to its first lines when long), a turn's work folded into one dim
+    // line ("Ran 3 commands, read brief.md") that opens on the calls, their
+    // errors and the remarks between them, the reply as markdown, a lone error in red.
     return <Box flexDirection="column" gap={1}>
       <Text dimColor wrap="wrap">{about}</Text>
       {open.omitted > 0 && <Text dimColor>{`${open.omitted} earlier entr${open.omitted === 1 ? 'y' : 'ies'} not shown`}</Text>}
@@ -691,9 +707,26 @@ export const register: Register = (on, options) => {
           return <Box key={key} flexDirection="column">
             {fold(item.at, toolSummary(item.lines), item.lines.filter(line => line.kind === 'error').length, isOpen, `g${item.at}`)}
             {isOpen && <Box flexDirection="column" marginTop={1} paddingLeft={2}>
-              {item.lines.map((line, i) => line.kind === 'error'
-                ? <Box key={`${key}-${i}`} paddingLeft={2} marginBottom={1}><Text color="error" wrap="wrap">{line.text}</Text></Box>
-                : <Box key={`${key}-${i}`} gap={1}><Box flexShrink={0}><Text>{line.tool ?? 'Tool'}</Text></Box><Box flexShrink={1} minWidth={0}><Text dimColor wrap="wrap">{line.text}</Text></Box></Box>)}
+              {item.lines.map(line => {
+                const lineKey = `${key}-${line.at}`;
+                if (line.kind === 'error') return <Box key={lineKey} paddingLeft={2} marginBottom={1}><Text color="error" wrap="wrap">{line.text}</Text></Box>;
+                if (line.kind === 'text') return <Box key={lineKey} marginY={1}><elements.Markdown text={line.text} /></Box>;
+                const call = <Box gap={1}><Box flexShrink={0}><Text>{line.tool ?? 'Tool'}</Text></Box><Box flexShrink={1} minWidth={0}><Text dimColor wrap="wrap">{line.text}</Text></Box></Box>;
+                // A call with something to show opens on it as the chat's own do: the
+                // command and what it printed, or an edit's hunks.
+                if (line.command === undefined && line.diff === undefined) return <Box key={lineKey}>{call}</Box>;
+                const callOpen = folds.has(`c${line.at}`);
+                return <Box key={lineKey} flexDirection="column">
+                  {desktop
+                    ? <Box>{disclosure(elements, `call-${line.at}`, [`${line.tool ?? 'Tool'} `, line.text], callOpen, `fold:${paneId}|c${line.at}`)}</Box>
+                    : <Box><Button key={`call-${line.at}`} plain dimColor onPress={() => { void toggleFold($, paneId, `c${line.at}`); }}>{`${line.tool ?? 'Tool'} ${line.text} ${callOpen ? '▾' : '▸'}`}</Button></Box>}
+                  {callOpen && <Box flexDirection="column" paddingLeft={2} marginY={1} gap={1}>
+                    {line.command !== undefined && <elements.Code source={line.command} {...(SHELL_LANGUAGE[line.tool ?? ''] ? { language: SHELL_LANGUAGE[line.tool ?? ''] } : {})} />}
+                    {line.output && <elements.Code source={line.output} />}
+                    {line.diff && <elements.Code source={line.diff} format="diff" path={line.text} />}
+                  </Box>}
+                </Box>;
+              })}
             </Box>}
           </Box>;
         }

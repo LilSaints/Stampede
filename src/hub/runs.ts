@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { lstat, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -19,6 +19,7 @@ import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
 import { Scheduler, AdmissionError } from './scheduler.js';
+import { Locks } from './locks.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
 import { type Agent, type AgentOpts, type Checkpoint, type Run, agentTerminal, runTerminal, cancelledAgents } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
@@ -55,6 +56,9 @@ const MAX_STEERS = 10;
 const TOOL_ITEMS = ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'];
 /** The largest args file read for argsPath, the same as an inline request. */
 const ARGS_MAX_BYTES = 4 * 1024 * 1024;
+/** A scratch folder longer than this, on Windows, gets a note: it leaves under 160 of the 260-character path limit. */
+const SCRATCH_PATH_WARN = 100;
+export const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; argsPath?: string; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; continueInterrupted?: boolean; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
@@ -62,6 +66,8 @@ export class RunManager extends EventEmitter {
   readonly runs = new Map<string, Run>();
   readonly active = new Map<string, RunExecution>();
   readonly scheduler: Scheduler;
+  /** Named locks workers take across every run (the lock tool). */
+  readonly locks = new Locks();
   readonly events: UiEvent[] = [];
   hubSeq = 0;
   hubUrl = '';
@@ -367,6 +373,13 @@ export class RunExecution {
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
     if (opts.scratch !== undefined && (!Array.isArray(opts.scratch) || opts.scratch.length > 10 || opts.scratch.some(dir => typeof dir !== 'string' || !dir.trim()))) throw new Error('scratch must be a list of at most 10 folders');
     if (opts.scratch?.length && (opts.access ?? (opts.isolation === 'worktree' ? 'edit' : 'read-only')) === 'read-only') throw new Error('scratch folders need edit or full access');
+    if (opts.env !== undefined) {
+      const entries = opts.env && typeof opts.env === 'object' && !Array.isArray(opts.env) ? Object.entries(opts.env) : undefined;
+      if (!entries || entries.length > 50 || entries.some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || typeof value !== 'string' || value.length > 8192 || value.includes('\0'))) throw new Error('env must map at most 50 variable names to strings');
+      const reserved = entries.find(([name]) => /^(STAMPEDE_|MCP_TOOL_TIMEOUT$)/i.test(name));
+      if (reserved) throw new Error(`env cannot set ${reserved[0]}: Stampede sets it`);
+    }
+    if (opts.locks !== undefined && (!Array.isArray(opts.locks) || opts.locks.length > 10 || opts.locks.some(name => typeof name !== 'string' || !LOCK_NAME.test(name)))) throw new Error('locks must be a list of at most 10 names of letters, digits, dots, hyphens or underscores');
     if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
     const model = opts.model ?? (backend === 'codex' && opts.agentType ? this.config.codex.agentTypes[opts.agentType].model : undefined) ?? this.config.codex.defaultModel;
@@ -523,10 +536,18 @@ export class RunExecution {
       writableDirs = c.scratch.filter(folder => within(folder, a.workspace.path) === 'outside');
       for (const folder of writableDirs) await mkdir(folder, { recursive: true });
     } catch (error) { throw Object.assign(error as Error, { kind: 'workspace' }); }
+    // Windows tools often stop at 260 characters, and a deep scratch folder leaves little of that to its content.
+    const deep = process.platform === 'win32' ? c.scratch.filter(folder => folder.length > SCRATCH_PATH_WARN) : [];
+    if (deep.length) await this.note(`${a.name}: scratch folder ${deep.join(', ')} is over ${SCRATCH_PATH_WARN} characters; keep tool and test-harness data in the worktree, where paths stay short`);
     c.cleanupRoots = a.access === 'read-only' ? [] : [...(a.workspace.kind === 'worktree' ? [{ path: a.workspace.path, allowRoot: false }] : []), ...c.scratch.map(folder => ({ path: folder, allowRoot: true }))];
-    const cleanupTool = c.cleanupRoots.length > 0 && (a.backend === 'claude' || backend.capabilities.mcpViaFlags !== false);
-    // Stampede's tools for this worker: all of them with comms, else only cleanup where it has somewhere to clean.
-    const mcpTools = a.comms.enabled ? agentTools.map(t => t.name).filter(name => name !== 'cleanup' || cleanupTool) : cleanupTool ? ['cleanup'] : [];
+    const mcpReady = a.backend === 'claude' || backend.capabilities.mcpViaFlags !== false;
+    const cleanupTool = c.cleanupRoots.length > 0 && mcpReady;
+    const lockTools = Boolean(c.opts.locks?.length);
+    if (lockTools && !mcpReady) throw Object.assign(new Error('locks need Stampede tools, which this Codex CLI is not qualified to load; run stampede doctor'), { kind: 'workspace' });
+    // Stampede's tools for this worker: all of them with comms, else only cleanup where it has somewhere to
+    // clean; lock and unlock where its call names locks.
+    const optional = (name: string) => name === 'cleanup' ? cleanupTool : name === 'lock' || name === 'unlock' ? lockTools : true;
+    const mcpTools = a.comms.enabled ? agentTools.map(t => t.name).filter(optional) : [...(cleanupTool ? ['cleanup'] : []), ...(lockTools ? ['lock', 'unlock'] : [])];
     await this.manager.store.write(mcpPath, { mcpServers: mcpTools.length ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token, STAMPEDE_AGENT_TOOLS: mcpTools.join(',') } } } : {} });
     const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${path.join(path.dirname(this.manager.cliEntry), 'hook.js')}" ${event} --backend claude`, timeout: 5 });
     // Other agents' worktrees are closed to a Claude agent, but for reading
@@ -548,7 +569,7 @@ export class RunExecution {
     const codexType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, writableDirs, model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, writableDirs, ...(c.opts.env ? { extraEnv: { ...c.opts.env } } : {}), model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch, locks: c.opts.locks }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
     // The model and effort asked for show until the backend reports the ones it resolved.
     a.model ??= c.launch.model;
     a.effort ??= c.launch.effort;
@@ -605,6 +626,8 @@ export class RunExecution {
       if (a.access !== 'read-only') await invalidateFingerprint(a.workspace.path, a.access === 'full');
       turn.endedAt = now(); turn.outcome = outcome; delete a.liveTokens; a.sessionId = outcome.sessionId ?? a.sessionId;
       const steered = c.steering === true; c.steering = false;
+      // A turn's locks go with it, but for one cut to deliver a message, which goes straight on.
+      if (!(steered && !outcome.ok && !c.abort.signal.aborted)) await this.releaseLocks(c, 'its turn ended');
       // A cut turn reports no usage: its thread's rollout counts what it spent.
       if (steered && a.sessionId && !outcome.usage.outputTokens) {
         const thread = await codexContext(a.sessionId).catch(() => undefined);
@@ -688,13 +711,21 @@ export class RunExecution {
     if (!c.finishing) c.finishing = this.finishNow(c, c.requestedTerminal ?? status);
     return c.finishing;
   }
+  /** Gives back the locks an agent still holds, saying so in the run log: it should have unlocked them itself. */
+  async releaseLocks(c: AgentContext, why: string) {
+    const names = this.manager.locks.releaseAll(c.agent.id);
+    if (names.length) await this.note(`${c.agent.name}: released lock${names.length === 1 ? '' : 's'} ${names.join(', ')} (${why})`);
+  }
   private async finishNow(c: AgentContext, status: Agent['status']) {
     if (agentTerminal(c.agent.status)) return;
+    await this.releaseLocks(c, 'the agent ended');
     if (status === 'done' && c.agent.result === undefined) throw new Error('cannot complete agent without stored result');
     // A done agent's scratch folders go before its worktree is snapshot, so none of it lands on its branch;
     // a failed or cancelled one's stay for inspection.
-    if (status === 'done' && c.scratch?.length) {
-      const { removed, refused } = await cleanup(c.scratch, c.agent.workspace.path, c.scratch.map(folder => ({ path: folder, allowRoot: true })));
+    // One the agent already deleted is left out: cleanup() resolves only roots that exist, so it would read as kept.
+    const scratch = status === 'done' && c.scratch?.length ? (await Promise.all(c.scratch.map(async folder => await lstat(folder).then(() => folder, () => undefined)))).filter((folder): folder is string => folder !== undefined) : [];
+    if (scratch.length) {
+      const { removed, refused } = await cleanup(scratch, c.agent.workspace.path, scratch.map(folder => ({ path: folder, allowRoot: true })));
       const failed = refused.filter(r => r.reason !== 'not found');
       if (removed.length || failed.length) await this.note(`${c.agent.name}: removed ${removed.length} scratch folder${removed.length === 1 ? '' : 's'}${failed.length ? `; kept ${failed.map(r => `${r.path} (${r.reason})`).join(', ')}` : ''}`);
     }
