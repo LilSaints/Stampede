@@ -51,12 +51,29 @@ if (prompt.startsWith('Your previous turn on this task was interrupted')) {
   let partial = 'nothing'; try { partial = await readFile(marker(), 'utf8'); } catch {}
   scenarioOutput = `continued ${resume >= 0 ? id : 'without a session'} with ${partial}`;
 }
+// Steering: a Codex turn running tool calls until the hub cuts it after one, then the resumed turn (or the one
+// after an answer, for a message that came too late) reports the message its prompt carried.
+const message = [...prompt.matchAll(/<stampede-message[^>]*>\n([\s\S]*?)\n<\/stampede-message>/g)].map(match => match[1]).join(' | ');
+if (prompt.startsWith('The orchestrator sent you the message below')) scenarioOutput = `steered: ${message}`;
+if (prompt.startsWith('You were idle and received new messages')) scenarioOutput = `resumed: ${message}`;
+if (prompt === 'fixture:steer' && codex) {
+  emit({ type: 'thread.started', thread_id: id }); emit({ type: 'turn.started' });
+  const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  for (let i = 0; i < 150; i++) {
+    emit({ type: 'item.started', item: { id: `item_${i}`, type: 'command_execution', command: 'step' } }); await pause(40);
+    emit({ type: 'item.completed', item: { id: `item_${i}`, type: 'command_execution', command: 'step', exit_code: 0 } }); await pause(40);
+  }
+  scenarioOutput = 'not steered';
+}
+if (prompt === 'fixture:slow') { await new Promise(resolve => setTimeout(resolve, 1500)); scenarioOutput = 'slow done'; }
+// The worker's own argv, for a test to inspect how the hub launched it.
+if (prompt === 'fixture:argv') scenarioOutput = JSON.stringify({ argv });
 if (prompt.startsWith('Adversarially verify: fixture-')) scenarioOutput = JSON.stringify({ isReal: prompt.endsWith('fixture-real') });
 const referenceJudge = /^Judge "(fixture-real|fixture-rejected)" via the (correctness|security|repro) lens/.exec(prompt);
 if (referenceJudge) scenarioOutput = JSON.stringify({ real: referenceJudge[1] === 'fixture-real' && referenceJudge[2] !== 'repro' });
 const designJudge = /^Score fixture design ([ABC])$/.exec(prompt);
 if (designJudge) scenarioOutput = JSON.stringify({ score: { A: 7, B: 10, C: 9 }[designJudge[1]] });
-if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt.startsWith('fixture:recovery:') || prompt === 'fixture:wait' || prompt === 'fixture:read-board') {
+if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || prompt.startsWith('fixture:recovery:') || prompt === 'fixture:wait' || prompt === 'fixture:read-board' || prompt.startsWith('fixture:cleanup:')) {
   const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
   const server = codex
@@ -74,6 +91,13 @@ if (prompt.startsWith('fixture:team') || prompt.startsWith('fixture:burst') || p
   };
   try {
     if (prompt === 'fixture:read-board') await tool('read_board', {});
+    else if (prompt.startsWith('fixture:cleanup:')) {
+      // Fixtures in its scratch folder, which it asks the hub to delete, and a path outside it the hub must refuse.
+      const [scratch, outside] = prompt.slice('fixture:cleanup:'.length).split('|');
+      await mkdir(path.join(scratch, 'junk'), { recursive: true }); await writeFile(path.join(scratch, 'junk', 'a.txt'), 'fixture');
+      const { tools } = await client.listTools();
+      scenarioOutput = JSON.stringify({ tools: tools.map(t => t.name), ...await tool('cleanup', { paths: [path.join(scratch, 'junk'), outside] }) });
+    }
     else if (prompt === 'fixture:wait') await tool('wait_for_message', { timeoutSec: 45 });
     else if (prompt.startsWith('fixture:burst')) {
       const identity = await tool('whoami', {});

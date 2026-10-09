@@ -17,10 +17,10 @@ export function codexArgv(a: AgentLaunch, options: { resumeThreadId?: string; pl
   }
   if (a.schemaPath) argv.push('--output-schema', a.schemaPath);
   if (a.lastMessagePath) argv.push('-o', a.lastMessagePath);
-  if (a.comms) argv.push(
+  if (a.comms || a.mcpTools?.length) argv.push(
     '-c', `mcp_servers.stampede.command=${quote(process.execPath)}`,
     '-c', `mcp_servers.stampede.args=${quote([a.cliEntry, 'mcp', '--role', 'agent'])}`,
-    '-c', `mcp_servers.stampede.env={${Object.entries({ ...a.mcpEnv, STAMPEDE_HUB_URL: a.hubUrl, STAMPEDE_AGENT_TOKEN: a.token }).map(([k, v]) => `${quote(k)}=${quote(v)}`).join(',')}}`,
+    '-c', `mcp_servers.stampede.env={${Object.entries({ ...a.mcpEnv, STAMPEDE_HUB_URL: a.hubUrl, STAMPEDE_AGENT_TOKEN: a.token, ...(a.mcpTools ? { STAMPEDE_AGENT_TOOLS: a.mcpTools.join(',') } : {}) }).map(([k, v]) => `${quote(k)}=${quote(v)}`).join(',')}}`,
     '-c', 'mcp_servers.stampede.tool_timeout_sec=120', '-c', 'mcp_servers.stampede.default_tools_approval_mode="approve"'
   );
   if (options.resumeThreadId) argv.push('resume', options.resumeThreadId);

@@ -15,6 +15,8 @@ export interface AgentOpts {
   readWorktrees?: string[];
   /** Where this agent's worktree starts: a git ref, or another agent's finished worktree (`{ agent: name }`); default the checkout's HEAD. */
   baseRef?: string | { agent: string };
+  /** Folders this agent may use for scratch files: it may delete inside them (the cleanup tool), and they are removed when it is done. Relative to its workspace. */
+  scratch?: string[];
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';
@@ -49,4 +51,10 @@ export interface Run {
   cacheHits: number; liveCalls: number;
   cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };
   notifications?: { hubSeq: number; runId: string; type: string; at: string; data: any }[];
+  /** The script's checkpoint() calls, in order: what each asked and how it was answered. */
+  checkpoints?: Checkpoint[];
 }
+/** A script's `checkpoint(name, data)`: it waits for the orchestrator's answer (workflow_answer), its timeout, or a replay from the run it resumes. */
+export interface Checkpoint { name: string; occ: number; data: unknown; status: 'waiting' | 'answered' | 'timed_out'; askedAt: string; timeoutMs: number; answeredAt?: string; answer?: unknown; replayedFrom?: string }
+/** Each cancelled agent of a run and, for one with a worktree, where its work is: branch, commit and path. */
+export const cancelledAgents = (run: Run) => run.agents.filter(a => a.status === 'cancelled').map(a => ({ name: a.name, ...(a.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, commit: a.workspace.commit ?? null, worktree: a.workspace.path, kept: a.workspace.kept ?? null } : {}) }));

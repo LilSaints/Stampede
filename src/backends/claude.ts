@@ -7,12 +7,13 @@ export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
   if (a.settingSources !== undefined) argv.push('--setting-sources', a.settingSources);
   if (a.model) argv.push('--model', a.model);
   if (a.effort) argv.push('--effort', a.effort);
+  if (a.agentsPath) argv.push('--agents', a.agentsPath);
   if (a.agentType) argv.push('--agent', a.agentType);
   // Every skill and custom command is listed in the prompt of each API call.
   if (a.skills === false) argv.push('--disable-slash-commands');
   if (a.maxUsd !== undefined) argv.push('--max-budget-usd', String(a.maxUsd));
   if (a.schema) { const json = JSON.stringify(a.schema); if (json.length > 24000) throw new Error('schema too large for Claude argv'); argv.push('--json-schema', json); }
-  const tools = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...(a.comms ? ['mcp__stampede__*'] : [])];
+  const tools = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', ...(a.comms ? ['mcp__stampede__*'] : (a.mcpTools ?? []).map(tool => `mcp__stampede__${tool}`))];
   // Removing recursion tools also protects against instructions in project files.
   // Other denials only shorten the prompt that every API call re-reads.
   const denied = ['Agent', 'Task', 'TeamCreate', 'TeamDelete', 'Workflow', ...(a.denyTools ?? [])];

@@ -5,6 +5,21 @@ function fixture(now?: () => number) {
   const peers = new Map<string, Peer>(['a', 'b', 'c', 'd'].map((name, i) => [name, { name, backend: i % 2 ? 'codex' : 'claude', comms: true, canMessage: '*', status: 'running', markedDone: false, turn: 1 }]));
   return new MessageBus('run_test', peers, { messageBytes: 16384, messagesPerAgent: 1000, messagesPerRun: 4000, claimLeaseMs: 100, rateCount: 1000 }, async () => {}, now);
 }
+test('the orchestrator writes to any agent; peers reach only those with comms, and both errors say why', async () => {
+  const bus = fixture();
+  bus.peers.set('plain', { name: 'plain', backend: 'codex', comms: false, canMessage: [], status: 'running', markedDone: false, turn: 1 });
+  assert.deepEqual((await bus.send('orchestrator', 'plain', 'use the new API')).deliveredTo, ['plain']);
+  await assert.rejects(bus.send('a', 'plain', 'hi'), (error: any) => error.code === 'unknown_recipient' && /no inbox for peers: start it with comms: true/.test(error.message));
+  await assert.rejects(bus.send('orchestrator', 'ghost', 'hi'), /no agent named ghost/);
+  // A broadcast from the orchestrator steers every live agent; a peer's reaches only those with comms.
+  assert.ok((await bus.send('orchestrator', '*', 'stop and report')).deliveredTo.includes('plain'));
+  assert.ok(!(await bus.send('a', '*', 'team note')).deliveredTo.includes('plain'));
+  assert.equal(bus.pendingSteer('plain'), 2);
+  assert.equal(bus.pendingSteer('b'), 1);
+  const claimed = await bus.claim('plain', 'read', 1);
+  const text = envelopes(claimed.messages, claimed.deliveries, bus.peers);
+  assert.match(text, /from the orchestrator steer your task/); assert.doesNotMatch(text, /peer agents/);
+});
 test('claims serialize all transports and revert on lease or abnormal turn', async () => {
   let now = 0;
   const bus = fixture(() => now);

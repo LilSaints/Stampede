@@ -31,6 +31,17 @@ export interface StampedeUiState {
   actionPending: boolean;
   uiConfig: { pollMs: number; idlePollMs: number; wakeDebounceMs: number; maxWakesPerHour: number };
 }
+/**
+ * The desktop's start cards, kept apart from `ui`: every reply's drawing reads
+ * this value, which changes only when a run starts or a reply is tagged, so
+ * the transcript is not redrawn on each poll.
+ */
+export interface StampedeStarts {
+  /** Runs this session's main loop started since Claude last wrote text, waiting for the reply that will carry their card. */
+  pending: string[];
+  /** The row id of the reply written after starting runs, and those runs. */
+  cards: Record<string, string[]>;
+}
 declare module 'claude-code' {
-  interface PluginState { stampede: { ui: StampedeUiState } }
+  interface PluginState { stampede: { ui: StampedeUiState; starts: StampedeStarts } }
 }

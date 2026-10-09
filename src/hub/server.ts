@@ -8,7 +8,8 @@ import { Security, type Identity } from './security.js';
 import { Store, readJson, readJournal } from './store.js';
 import { RunManager } from './runs.js';
 import { agentTranscript } from './transcript.js';
-import { type Agent, type Run, runTerminal, agentTerminal } from './model.js';
+import { type Agent, type Run, runTerminal, agentTerminal, cancelledAgents } from './model.js';
+import { cleanup } from './cleanup.js';
 import { probeBackends, type BackendInfo } from './capabilities.js';
 import { hash } from './workspaces.js';
 import { validateTool } from '../mcp/tools.js';
@@ -26,7 +27,9 @@ export function summary(run: Run, session?: string) {
     phases: run.phases.map(p => ({ ...p, counts: Object.fromEntries(['queued', 'running', 'waiting', 'idle', 'done', 'failed'].map(s => [s, run.agents.filter(a => a.phase === p.title && a.status === s).length])) })),
     agents: run.agents.map(a => ({ name: a.name, label: a.label, backend: a.backend, model: a.model, effort: a.effort, context: a.context, ...(a.continues ? { continued: a.continues.runId } : {}), startedAt: a.turns[0]?.startedAt, endedAt: ['done', 'failed', 'cancelled', 'skipped'].includes(a.status) ? a.turns.at(-1)?.endedAt : undefined, status: a.status, phase: a.phase, role: a.role, comms: a.comms.enabled, markedDone: a.markedDone, tokens: a.usage.outputTokens + live(a), lastActivity: a.lastActivityAt, error: a.error, workspace: a.workspace })),
     budget: { spent: run.budget.spentTokens + run.agents.reduce((sum, a) => sum + live(a), 0), total: run.budget.totalTokens, spentUsd: run.budget.spentUsd, billedUsd: run.agents.reduce((sum, a) => sum + (a.billing === 'api' ? a.usage.usd ?? 0 : 0), 0) }, log: run.log.slice(-10).map(s => truncate(s, 300)), seenSeq: session ? run.seenSeq[session] ?? 0 : 0,
-    resultPath: path.join(path.dirname(run.scriptPath), 'result.json'), error: run.error, notifications: run.notifications ?? [] };
+    resultPath: path.join(path.dirname(run.scriptPath), 'result.json'), error: run.error, notifications: run.notifications ?? [],
+    // A checkpoint the script waits on, for the orchestrator to answer with workflow_answer.
+    checkpoints: (run.checkpoints ?? []).filter(cp => cp.status === 'waiting').map(cp => ({ name: cp.name, occ: cp.occ, data: cp.data, askedAt: cp.askedAt, timeoutMs: cp.timeoutMs })) };
 }
 export async function startHub(options: { home: string; config: Config; cliEntry: string; backends?: Record<'claude' | 'codex', BackendInfo>; security?: Security }) {
   const { home, config } = options;
@@ -100,6 +103,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     else if (name === 'workflow_resume') result = await manager.resume(input.runId, input);
     else if (name === 'workflow_control') result = await manager.control(input.runId, input.action);
     else if (name === 'workflow_send') { if (!execution) throw new Error('run is terminal'); result = await execution.sendOrchestrator(input.to, input.text); }
+    else if (name === 'workflow_answer') { if (!execution) throw new Error('run is terminal'); result = await execution.answerCheckpoint(input.name, input.answer); }
     else if (name === 'workflow_status' || name === 'workflow_wait') {
       let woke;
       if (name === 'workflow_wait') {
@@ -113,7 +117,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       }
       observedSeq = manager.hubSeq;
       const view = await runSummary(run!, input.orchestratorSessionId);
-      result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, error: run!.error, ...(woke ? { woke } : {}) };
+      result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, ...(view.checkpoints.length ? { checkpoints: view.checkpoints } : {}), latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, error: run!.error, ...(woke ? { woke } : {}) };
     } else if (name === 'workflow_result' && input.agent !== undefined) {
       // One agent's result, readable while the run goes on; a long one is read from its file.
       const agent = run!.agents.find(a => a.name === input.agent); if (!agent) throw new Error('unknown agent');
@@ -131,7 +135,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
           result = { ...result, ...(last.length > AGENT_RESULT_CHARS ? { lastAnswer: truncate(last, AGENT_RESULT_CHARS), lastAnswerPath } : { lastAnswer: last }) };
         }
       }
-    } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) }; }
+    } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run!) }; }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';
       const inbox = (await messages(run!)).filter(m => (m.to === 'orchestrator' || m.to === '*' && m.from !== 'orchestrator') && (input.unreadOnly === false || m.seq > (run!.readSeq[key] ?? 0))).slice(0, input.max ?? 20);
@@ -158,9 +162,11 @@ export async function startHub(options: { home: string; config: Config; cliEntry
   }
   async function agentRoute(token: string, name: string, input: any, signal: AbortSignal) {
     let found;
-    for (const execution of manager.active.values()) for (const c of execution.contexts.values()) if (!agentTerminal(c.agent.status) && c.agent.comms.enabled && matches(hash(token), c.tokenHash)) found = { execution, c };
+    for (const execution of manager.active.values()) for (const c of execution.contexts.values()) if (!agentTerminal(c.agent.status) && matches(hash(token), c.tokenHash)) found = { execution, c };
     if (!found) throw Object.assign(new Error('unauthorized agent'), { statusCode: 401 });
     const { execution, c } = found; const a = c.agent; const bus = execution.bus;
+    // Every agent reads its inbox (the hooks' claim); one without comms has cleanup at most, where it has somewhere to clean.
+    if (!a.comms.enabled && !['claim', 'claim-ack', ...(c.cleanupRoots?.length ? ['cleanup'] : [])].includes(name)) throw Object.assign(new Error('this agent has no Stampede messaging tools: start it with comms: true'), { statusCode: 403 });
     if (name === 'claim-ack') { if (typeof input.claimId !== 'string') throw new Error('claimId required'); return { ok: await bus.ack(a.name, input.claimId) }; }
     if (name === 'claim') {
       if (input.event === 'stop' && (a.markedDone || a.stopBlocks >= config.limits.maxStopBlocks)) return { messages: [] };
@@ -181,6 +187,11 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     }
     if (name === 'post_finding') { const entry = await bus.post(a.name, input); await execution.event('board.posted', entry); return { seq: entry.seq, id: entry.id }; }
     if (name === 'read_board') return { entries: bus.board(input.topic, input.sinceSeq, input.max), lastSeq: bus.entries.at(-1)?.seq ?? 0 };
+    if (name === 'cleanup') {
+      const outcome = await cleanup(input.paths, a.workspace.path, c.cleanupRoots ?? []);
+      if (outcome.removed.length) await execution.event('agent.cleanup', { name: a.name, removed: outcome.removed.length });
+      return outcome;
+    }
     if (name === 'mark_done') { a.markedDone = true; execution.peers.get(a.name)!.markedDone = true; await execution.event('agent.status', { name: a.name, markedDone: true }); return { ok: true, reminder: 'End your turn now with your final answer, matching the schema if supplied. mark_done does not store your result.' }; }
   }
   const requests = new Set<Promise<void>>();

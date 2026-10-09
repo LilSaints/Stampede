@@ -9,6 +9,14 @@ import { launchTurn, workerEnv } from '../../src/backends/procs.js';
 import type { AgentLaunch } from '../../src/backends/adapter.js';
 import { defaults } from '../../src/hub/config.js';
 function launch(dir: string): AgentLaunch { return { backend: 'codex', binary: process.execPath, entry: path.resolve('test/fake-backends/cli.mjs'), cwd: dir, access: 'read-only', model: 'fixture', effort: 'low', mcpPath: '', settingsPath: '', contract: 'fixture', comms: false, hubUrl: '', cliEntry: '', windowsSandbox: 'elevated', timeoutMs: 3000, stdoutPath: path.join(dir, 'stdout.jsonl'), stderrPath: path.join(dir, 'stderr.txt') }; }
+test('a worker without comms gets only the Stampede tools the hub gives it, and an agent type copy by file', () => {
+  const claude = claudeArgv({ ...launch('.'), backend: 'claude', access: 'edit', mcpTools: ['cleanup'], agentsPath: 'agents.json', agentType: 'stampede-reviewer' });
+  assert.ok(claude.includes('mcp__stampede__cleanup')); assert.ok(!claude.includes('mcp__stampede__*'));
+  assert.equal(claude[claude.indexOf('--agents') + 1], 'agents.json'); assert.equal(claude[claude.indexOf('--agent') + 1], 'stampede-reviewer');
+  const codex = codexArgv({ ...launch('.'), access: 'edit', mcpTools: ['cleanup'], token: 'fixture-token' }, { platform: 'linux' });
+  assert.ok(codex.some(arg => arg.startsWith('mcp_servers.stampede.env=') && arg.includes('"STAMPEDE_AGENT_TOOLS"="cleanup"')));
+  assert.ok(!codexArgv(launch('.'), { platform: 'linux' }).some(arg => arg.startsWith('mcp_servers.stampede')));
+});
 test('Codex resume preserves all options before the resume tail', () => {
   const a = { ...launch('.'), comms: true, token: 'test-token' };
   const start = codexArgv(a, { platform: 'win32' });

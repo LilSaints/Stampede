@@ -7,6 +7,10 @@ export interface AgentLaunch {
   access: 'read-only' | 'edit' | 'full'; model?: string; effort?: string; agentType?: string;
   schema?: Schema; schemaPath?: string; lastMessagePath?: string;
   mcpPath: string; settingsPath: string; contract: string; comms: boolean;
+  /** The Stampede tools the worker gets: every one with comms, else at most `cleanup`; none, no Stampede server. */
+  mcpTools?: string[];
+  /** A file of Claude agent definitions (`--agents`): the agent type copied with the tools it needs added. */
+  agentsPath?: string;
   hubUrl: string; token?: string; cliEntry: string;
   windowsSandbox: string; timeoutMs: number; stdoutPath: string; stderrPath: string;
   inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number; persistNonComms?: boolean;

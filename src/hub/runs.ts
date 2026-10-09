@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { ulid } from 'ulid';
 import { executeWorkflow } from '../runtime/hooks.js';
@@ -9,14 +10,17 @@ import { type AgentLaunch, type TurnHandle, zeroUsage } from '../backends/adapte
 import { launchTurn } from '../backends/procs.js';
 import { codexSchema, jsonAnswer, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
+import { agentTools } from '../mcp/tools.js';
 import { externalTools } from '../backends/tool-usage.js';
+import { findAgentFile, withTools } from '../backends/claudeAgents.js';
+import { type CleanupRoot, cleanup, scratchFolders } from './cleanup.js';
 import { claudeContext, claudeReplies, claudeSessionExists, claudeTranscriptSize, claudeWindow, codexContext, codexThreadExists } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
 import { type BackendInfo } from './capabilities.js';
 import { Scheduler, AdmissionError } from './scheduler.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
-import { type Agent, type AgentOpts, type Run, agentTerminal, runTerminal } from './model.js';
+import { type Agent, type AgentOpts, type Checkpoint, type Run, agentTerminal, runTerminal, cancelledAgents } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
 import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, git, repoRoot, resolveCommit } from './workspaces.js';
 
@@ -33,13 +37,25 @@ interface AgentContext {
   key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean; base?: string;
   finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
   shared: { reads: string[]; writes: string[] };
+  /** A Codex turn being cut after a tool call to deliver the orchestrator's message, and how many times it was. */
+  steering?: boolean; steers?: number;
+  /** Where the agent may delete (its worktree, its scratch folders), and the scratch folders removed when it is done. */
+  cleanupRoots?: CleanupRoot[]; scratch?: string[];
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
 /** What an agent cut off by a stopping hub records, so a resumed run can continue it. */
 const INTERRUPTED = { kind: 'interrupted', message: 'the hub stopped during this agent\'s turn' };
 /** The first prompt of a continued agent, in the session that holds the original task. */
 const CONTINUE_PROMPT = 'Your previous turn on this task was interrupted before it finished: the Stampede hub stopped. This session and your workspace, with any changes you made, are as you left them. Check where you stopped, continue the original task, and end with the final answer it asks for.';
-export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; continueInterrupted?: boolean; limits?: Partial<Config['limits']> }
+/** The prompt resuming a Codex turn cut after a tool call so the orchestrator's message reaches it; the message follows. */
+const STEER_PROMPT = 'The orchestrator sent you the message below while you worked, so your turn was stopped right after your last tool call finished. Your session and workspace are as you left them. Apply the message, continue your task, and end with the final answer it asks for.';
+/** How often one agent's turns are cut to deliver steering; past it, messages wait for the turn's end. */
+const MAX_STEERS = 10;
+/** The Codex items that are tool calls: a turn is cut only after one ends, so nothing it runs is cut off. */
+const TOOL_ITEMS = ['command_execution', 'file_change', 'mcp_tool_call', 'web_search'];
+/** The largest args file read for argsPath, the same as an inline request. */
+const ARGS_MAX_BYTES = 4 * 1024 * 1024;
+export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; argsPath?: string; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; continueInterrupted?: boolean; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
 
 export class RunManager extends EventEmitter {
@@ -78,9 +94,9 @@ export class RunManager extends EventEmitter {
   }
   async event(run: Run, type: string, data: any = {}) {
     return this.eventMutex.run(async () => {
-      if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
+      if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
-      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.done'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
+      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.done', 'checkpoint.waiting'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
       await this.store.append(path.join(this.store.runDir(run.id), 'events.jsonl'), event);
       await this.store.write(path.join(this.store.runDir(run.id), 'run.json'), run);
@@ -99,10 +115,20 @@ export class RunManager extends EventEmitter {
     }
     throw new Error('saved workflow not found');
   }
+  /** The run's args: inline, or read from a JSON file (argsPath, relative to the run's cwd), never both. */
+  async args(input: RunInput, cwd: string) {
+    if (input.argsPath === undefined) return input.args ?? null;
+    if (input.args !== undefined) throw new Error('provide args or argsPath, not both');
+    if (typeof input.argsPath !== 'string' || !input.argsPath) throw new Error('argsPath must be a file path');
+    const file = path.resolve(cwd, input.argsPath);
+    const text = await readFile(file, 'utf8').catch(error => { throw new Error(`argsPath: cannot read ${file}: ${(error as Error).message}`); });
+    if (Buffer.byteLength(text) > ARGS_MAX_BYTES) throw new Error(`argsPath: ${file} is larger than 4 MiB`);
+    try { return JSON.parse(text.replace(/^﻿/, '')); } catch (error) { throw new Error(`argsPath: ${file} is not valid JSON: ${(error as Error).message}`); }
+  }
   async start(input: RunInput, resumeOf?: string) {
     if (this.closing) throw new Error('hub is shutting down');
     const cwd = path.resolve(input.cwd ?? process.cwd());
-    const source = await this.source(input, cwd); const parsed = parseWorkflow(source);
+    const source = await this.source(input, cwd); const parsed = parseWorkflow(source), args = await this.args(input, cwd);
     const config = lowerConfig(this.config, await readJson(path.join(cwd, '.stampede', 'config.json')) ?? {});
     const effective = input.limits ? lowerConfig(config, { limits: input.limits }) : config;
     for (const budget of [input.budgetTokens, input.budgetUsd]) if (budget !== undefined && (!Number.isFinite(budget) || budget < 0)) throw new Error('budget must be a non-negative finite number');
@@ -115,7 +141,7 @@ export class RunManager extends EventEmitter {
     const id = `run_${ulid()}`; const directory = this.store.runDir(id);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const scriptPath = path.join(directory, 'script.js'); await writeFile(scriptPath, source, { mode: 0o600 });
-    const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), ...(resumeOf && input.continueInterrupted === false ? { continueInterrupted: false } : {}), cwd, scriptPath, scriptSha256: hash(source), args: input.args ?? null, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
+    const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), ...(resumeOf && input.continueInterrupted === false ? { continueInterrupted: false } : {}), cwd, scriptPath, scriptSha256: hash(source), args, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
     run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
@@ -129,9 +155,11 @@ export class RunManager extends EventEmitter {
     void execution.task.catch(error => { this.emit('internalError', error); });
     return { runId: id, status: run.status, scriptPath, cacheHits: 0, liveCalls: 0, ...run.cacheReport };
   }
-  async resume(id: string, input: { scriptPath?: string; args?: unknown; orchestratorSessionId?: string; continueInterrupted?: boolean }) {
+  async resume(id: string, input: { scriptPath?: string; args?: unknown; argsPath?: string; orchestratorSessionId?: string; continueInterrupted?: boolean }) {
     const old = this.get(id); if (!runTerminal(old.status)) throw new Error('only terminal runs may be resumed');
-    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, args: Object.hasOwn(input, 'args') ? input.args : old.args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title, continueInterrupted: input.continueInterrupted }, id);
+    // New args inline or from a file replace the old run's; without either it keeps them.
+    const args = input.argsPath !== undefined ? { argsPath: input.argsPath, ...(Object.hasOwn(input, 'args') ? { args: input.args } : {}) } : { args: Object.hasOwn(input, 'args') ? input.args : old.args };
+    return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, ...args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title, continueInterrupted: input.continueInterrupted }, id);
   }
   async control(id: string, action: string) {
     const run = this.get(id), execution = this.active.get(id);
@@ -169,6 +197,11 @@ export class RunExecution {
   private readonly childTasks = new Set<Promise<unknown>>();
   draining = false;
   private cancellation?: Promise<void>;
+  /** Agents the orchestrator or the person cancelled (agent_control), as opposed to ones a run's end stopped. */
+  private readonly cancelRequested = new Set<string>();
+  /** checkpoint() calls waiting for an answer, oldest first per name, and how many each name has made. */
+  private readonly checkpointWaiters = new Map<string, { record: Checkpoint; settle: (answer: unknown) => void }[]>();
+  private readonly checkpointCounts = new Map<string, number>();
   constructor(readonly manager: RunManager, readonly run: Run, readonly config: Config) {
     this.bus = new MessageBus(run.id, this.peers, { ...config.limits, claimLeaseMs: config.delivery.claimLeaseMs }, async (kind, value) => {
       await manager.store.append(path.join(manager.store.runDir(run.id), kind === 'board.posted' ? 'board.jsonl' : 'messages.jsonl'), { kind, value });
@@ -190,6 +223,8 @@ export class RunExecution {
     await this.event('backend.unavailable', { backend, error, hint });
   }
   event(type: string, value: any = {}) { return this.manager.event(this.run, type, value); }
+  /** The cancelled agents a run's end reports, with where each one's work is; nothing when none was cancelled. */
+  private cancelledReport() { const cancelled = cancelledAgents(this.run); return cancelled.length ? { cancelled } : {}; }
   sharedUse(name: string, tool: string, write = false) {
     const c = this.contexts.get(name)!; c.tainted = true;
     const uses = write ? c.shared.writes : c.shared.reads;
@@ -204,7 +239,9 @@ export class RunExecution {
       this.draining = true;
       await this.stopMembers([...this.contexts.keys()]);
       for (const team of this.teams.values()) if (team.key) await this.recordTeam(team);
-      if (!runTerminal(this.run.status)) { this.run.status = 'completed'; this.run.endedAt = now(); await this.event('run.status', { status: 'completed' }); }
+      // A script that went on to its end after its agents were cancelled did none of its work: the run is cancelled.
+      const cancelled = this.cancelRequested.size > 0 && !this.run.agents.some(a => a.status === 'done');
+      if (!runTerminal(this.run.status)) { this.run.status = cancelled ? 'cancelled' : 'completed'; this.run.endedAt = now(); await this.event('run.status', { status: this.run.status, ...this.cancelledReport() }); }
     } catch (error) {
       if (!runTerminal(this.run.status)) { this.run.error = { message: (error as Error).message, stack: (error as Error).stack }; await this.cancel('failed'); }
     } finally {
@@ -213,7 +250,7 @@ export class RunExecution {
       await Promise.allSettled(this.childTasks);
       await this.cancellation;
       await Promise.allSettled([...this.teams.values()].map(team => team.admission));
-      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })) });
+      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(this.run) });
       await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'run.json'), this.run);
       for (const c of this.contexts.values()) { c.token = ''; for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.agentDir(c.agent), file), { force: true }); }
     }
@@ -225,6 +262,7 @@ export class RunExecution {
     if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
     // An agent's worktree as the script needs it to continue that work: branch, commits and path.
     if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name); return a?.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, baseCommit: a.workspace.baseCommit ?? null, commit: a.workspace.commit ?? null, path: a.workspace.path, kept: a.workspace.kept ?? null } : null; }
+    if (method === 'checkpoint') return this.checkpoint(params);
     if (method === 'log') { this.run.log.push(params.message); this.run.log = this.run.log.slice(-100); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
     if (method === 'board' || method === 'team.board') return this.bus.entries.filter(e => !params.topic || e.topic === params.topic);
@@ -252,6 +290,55 @@ export class RunExecution {
     for (const team of this.teams.values()) if (to === '*' || team.names.includes(to)) team.lastOrchestratorMessage = Date.now();
     return sent;
   }
+  /**
+   * A script's `checkpoint(name, data, { timeoutMs, default })`: the script
+   * waits while the orchestrator is woken, and goes on with its answer
+   * (workflow_answer), or with `default` (null) once the timeout passes. A
+   * resumed run replays the answer its earlier run gave the same checkpoint
+   * (name, occurrence and data), so its cached calls stay cached.
+   */
+  async checkpoint(params: any) {
+    const name = params?.name, data = params?.data ?? null, opts = params?.opts ?? {};
+    if (typeof name !== 'string' || !/^[\w .:-]{1,80}$/.test(name)) throw new Error('checkpoint name must be 1 to 80 letters, digits, spaces or . _ : -');
+    const text = JSON.stringify(data);
+    if (text === undefined || Buffer.byteLength(text) > 32768) throw new Error('checkpoint data must be JSON of at most 32 KiB');
+    const timeoutMs = opts.timeoutMs ?? 3600000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 86400000) throw new Error('checkpoint timeoutMs must be positive and at most 24 hours');
+    const occ = (this.checkpointCounts.get(name) ?? 0) + 1; this.checkpointCounts.set(name, occ);
+    const record: Checkpoint = { name, occ, data, status: 'waiting', askedAt: now(), timeoutMs };
+    this.run.checkpoints = [...this.run.checkpoints ?? [], record];
+    const old = this.run.resumeOf ? this.manager.runs.get(this.run.resumeOf) : undefined;
+    const prior = old?.checkpoints?.find(cp => cp.name === name && cp.occ === occ && cp.status === 'answered' && canonical(cp.data) === canonical(data));
+    if (prior) {
+      Object.assign(record, { status: 'answered', answer: prior.answer, answeredAt: now(), replayedFrom: old!.id });
+      await this.note(`checkpoint ${name}: replayed the answer given in ${old!.id}`);
+      return prior.answer;
+    }
+    return new Promise((resolve, reject) => {
+      const waiters = this.checkpointWaiters.get(name) ?? [];
+      const leave = () => { clearTimeout(timer); this.abort.signal.removeEventListener('abort', abort); const left = (this.checkpointWaiters.get(name) ?? []).filter(w => w.record !== record); if (left.length) this.checkpointWaiters.set(name, left); else this.checkpointWaiters.delete(name); };
+      const abort = () => { leave(); reject(new Error('run cancelled')); };
+      const timer = setTimeout(() => {
+        leave(); Object.assign(record, { status: 'timed_out', answeredAt: now() });
+        void this.note(`checkpoint ${name}: no answer within ${Math.round(timeoutMs / 1000)}s, so the script goes on with its default`).catch(() => {});
+        resolve(opts.default ?? null);
+      }, timeoutMs);
+      this.abort.signal.addEventListener('abort', abort, { once: true });
+      waiters.push({ record, settle: answer => { leave(); Object.assign(record, { status: 'answered', answer, answeredAt: now() }); resolve(answer); } });
+      this.checkpointWaiters.set(name, waiters);
+      void this.event('checkpoint.waiting', { name, occ, data: text.length > 2000 ? text.slice(0, 2000) + '…' : data, timeoutMs }).catch(e => this.fail(e));
+    });
+  }
+  /** The orchestrator's answer to the oldest waiting checkpoint of that name. */
+  async answerCheckpoint(name: string, answer: unknown) {
+    const waiter = this.checkpointWaiters.get(name)?.[0];
+    if (!waiter) throw new Error(`no checkpoint named ${name} is waiting`);
+    const text = JSON.stringify(answer ?? null);
+    if (Buffer.byteLength(text) > 65536) throw new Error('answer must be JSON of at most 64 KiB');
+    waiter.settle(answer ?? null);
+    await this.event('checkpoint.answered', { name, occ: waiter.record.occ });
+    return { name, occ: waiter.record.occ, status: 'answered' };
+  }
   private validate(prompt: string, opts: AgentOpts, team = false) {
     if (typeof prompt !== 'string') throw new Error('agent prompt must be a string');
     if (!this.budgetAvailable()) throw new Error('budget exhausted');
@@ -278,6 +365,8 @@ export class RunExecution {
       if (typeof ref === 'object' && !this.run.agents.find(a => a.name === ref.agent)?.workspace.commit) throw new Error(`baseRef agent ${ref.agent} has no finished worktree`);
     }
     if (opts.cacheInputs !== undefined && (!Array.isArray(opts.cacheInputs) || opts.cacheInputs.some(file => typeof file !== 'string'))) throw new Error('cacheInputs must be an array of paths');
+    if (opts.scratch !== undefined && (!Array.isArray(opts.scratch) || opts.scratch.length > 10 || opts.scratch.some(dir => typeof dir !== 'string' || !dir.trim()))) throw new Error('scratch must be a list of at most 10 folders');
+    if (opts.scratch?.length && (opts.access ?? (opts.isolation === 'worktree' ? 'edit' : 'read-only')) === 'read-only') throw new Error('scratch folders need edit or full access');
     if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
     const model = opts.model ?? (backend === 'codex' && opts.agentType ? this.config.codex.agentTypes[opts.agentType].model : undefined) ?? this.config.codex.defaultModel;
@@ -424,7 +513,16 @@ export class RunExecution {
     if (!backend.available || this.unavailable.has(a.backend)) throw new Error(backend.error ?? 'backend unavailable');
     const dir = this.agentDir(a); await mkdir(dir, { recursive: true, mode: 0o700 });
     const mcpPath = path.join(dir, 'mcp.json'), settingsPath = path.join(dir, 'settings.json');
-    await this.manager.store.write(mcpPath, { mcpServers: a.comms.enabled ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token } } } : {} });
+    // The hub deletes for the agent (cleanup) inside its own worktree and its scratch folders; a shared
+    // workspace is the user's checkout, so never there. Scratch folders go when the agent is done.
+    const repo = await repoRoot(this.run.cwd).catch(() => undefined);
+    try { c.scratch = scratchFolders(c.opts.scratch, a.workspace.path, [os.homedir(), this.manager.store.home, this.run.cwd, ...(repo ? [repo] : []), a.workspace.path]); }
+    catch (error) { throw Object.assign(error as Error, { kind: 'workspace' }); }
+    c.cleanupRoots = a.access === 'read-only' ? [] : [...(a.workspace.kind === 'worktree' ? [{ path: a.workspace.path, allowRoot: false }] : []), ...c.scratch.map(folder => ({ path: folder, allowRoot: true }))];
+    const cleanupTool = c.cleanupRoots.length > 0 && (a.backend === 'claude' || backend.capabilities.mcpViaFlags !== false);
+    // Stampede's tools for this worker: all of them with comms, else only cleanup where it has somewhere to clean.
+    const mcpTools = a.comms.enabled ? agentTools.map(t => t.name).filter(name => name !== 'cleanup' || cleanupTool) : cleanupTool ? ['cleanup'] : [];
+    await this.manager.store.write(mcpPath, { mcpServers: mcpTools.length ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token, STAMPEDE_AGENT_TOOLS: mcpTools.join(',') } } } : {} });
     const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${path.join(path.dirname(this.manager.cliEntry), 'hook.js')}" ${event} --backend claude`, timeout: 5 });
     // Other agents' worktrees are closed to a Claude agent, but for reading
     // the ones its call names in readWorktrees (a reviewer of an integrator's
@@ -432,11 +530,20 @@ export class RunExecution {
     const readable = new Set(c.opts.readWorktrees ?? []);
     const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => ({ name: p.name, root: p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name) })));
     const denied: [string, string[]][] = [[this.manager.store.home, ['Read', 'Edit', 'Write']], ...otherWorktrees.map(({ name, root }): [string, string[]] => [root, readable.has(name) ? ['Edit', 'Write'] : ['Read', 'Edit', 'Write']])];
-    await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, ...(a.comms.enabled ? { hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } } : {}) });
-    const agentType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
+    await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } });
+    // Every Claude worker reads its inbox after each tool call and before it stops, so the orchestrator can steer any of them.
+    // An agent type listing its tools leaves out the structured-output tool and Stampede's: a copy of it adds them.
+    let agentType = c.opts.agentType, agentsPath: string | undefined;
+    if (a.backend === 'claude' && c.opts.agentType) {
+      const needed = [...(c.opts.schema ? ['StructuredOutput'] : []), ...mcpTools.map(tool => `mcp__stampede__${tool}`)];
+      const found = needed.length ? await findAgentFile(c.opts.agentType, a.workspace.path) : undefined;
+      const definition = found && withTools(found, c.opts.agentType, needed);
+      if (definition) { agentType = `stampede-${c.opts.agentType}`; agentsPath = path.join(dir, 'agents.json'); await this.manager.store.write(agentsPath, { [agentType]: definition }); }
+    }
+    const codexType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
     // The model and effort asked for show until the backend reports the ones it resolved.
     a.model ??= c.launch.model;
     a.effort ??= c.launch.effort;
@@ -452,7 +559,8 @@ export class RunExecution {
       if (!this.budgetAvailable()) { a.error = { kind: 'budget', message: 'budget exhausted' }; await this.finish(c, 'failed'); return; }
       const n = a.turns.length + 1; const dir = this.agentDir(a);
       const launch = { ...c.launch!, stdoutPath: path.join(dir, `turn-${n}.stdout.jsonl`), stderrPath: path.join(dir, `turn-${n}.stderr.log`), lastMessagePath: path.join(dir, `turn-${n}.last.txt`) };
-      const claim = a.comms.enabled ? await this.bus.claim(a.name, resume ? 'resume' : 'read', n, 50) : undefined;
+      // Every agent's prompt carries what its inbox holds: peers' messages with comms, the orchestrator's always.
+      const claim = await this.bus.claim(a.name, resume ? 'resume' : 'read', n, 50);
       if (claim?.messages.length) { this.sharedUse(a.name, resume ? 'delivery:resume' : 'delivery:stdin'); prompt += '\n' + envelopes(claim.messages, claim.deliveries, this.peers); }
       // The turn's prompt beside its stream, for the transcript the pane shows.
       await writeFile(path.join(dir, `turn-${n}.prompt.txt`), prompt, { mode: 0o600 }).catch(() => {});
@@ -464,6 +572,9 @@ export class RunExecution {
       // A resumed session's transcript already holds earlier turns, so this one counts from its end.
       const resumed = resume || kind === 'schema-repair' ? a.sessionId : undefined;
       if (a.backend === 'claude') this.claudeRead.set(a.id, { offset: resumed ? await claudeTranscriptSize(resumed, a.workspace.path) : 0, replies: new Map(), at: 0, reading: false });
+      // Codex runs no hooks, so the orchestrator's message is delivered by cutting the turn right after a tool
+      // call ends, with none still running, and resuming its thread with the message (STEER_PROMPT).
+      const running = new Set<string>();
       c.handle = launchTurn(launch, prompt, { resumeSessionId: resume || kind === 'schema-repair' ? a.sessionId : undefined, onSpawn: pid => this.manager.processStarted?.(pid, a) ?? Promise.resolve(), onHanded: async () => { if (claim?.claimId) await this.bus.ack(a.name, claim.claimId); }, onEvent: event => {
         a.lastActivityAt = now();
         // Saved as soon as known: a hub killed mid-turn leaves only what is on disk to continue from.
@@ -478,12 +589,23 @@ export class RunExecution {
           if (context || window) a.context = { tokens: context?.tokens ?? a.context?.tokens ?? 0, ...((window ?? a.context?.window) ? { window: window ?? a.context?.window } : {}) };
           // The stream's own usage counts output as each request starts; the transcript has its final count.
           this.claudeOutput(a);
-        } else if (event.type === 'item.completed' || event.type === 'turn.completed') this.codexContext(a, event.type === 'turn.completed');
+        } else {
+          if (event.type === 'item.completed' || event.type === 'turn.completed') this.codexContext(a, event.type === 'turn.completed');
+          if (event.type === 'item.started' && event.item?.id) running.add(event.item.id);
+          if (event.type === 'item.completed') { running.delete(event.item?.id); if (TOOL_ITEMS.includes(event.item?.type) && !running.size) this.steer(c); }
+        }
       } });
       await this.status(c, 'running');
       const outcome = await c.handle.done; c.handle = undefined; this.run.counters.agentsRunning--;
       if (a.access !== 'read-only') await invalidateFingerprint(a.workspace.path, a.access === 'full');
       turn.endedAt = now(); turn.outcome = outcome; delete a.liveTokens; a.sessionId = outcome.sessionId ?? a.sessionId;
+      const steered = c.steering === true; c.steering = false;
+      // A cut turn reports no usage: its thread's rollout counts what it spent.
+      if (steered && a.sessionId && !outcome.usage.outputTokens) {
+        const thread = await codexContext(a.sessionId).catch(() => undefined);
+        const before = a.turns.filter(t => t !== turn && t.outcome?.sessionId === a.sessionId).reduce((sum, t) => sum + t.outcome!.usage.outputTokens, 0);
+        if (thread?.spent !== undefined) outcome.usage.outputTokens = Math.max(0, thread.spent - before);
+      }
       if (a.backend === 'codex') this.codexContext(a, true);
       for (const key of ['inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningTokens'] as const) a.usage[key] += outcome.usage[key];
       const pricing = a.backend === 'codex' ? this.config.pricing.codex?.[launch.model!] : undefined;
@@ -501,6 +623,8 @@ export class RunExecution {
       await this.event('agent.turn.end', { name: a.name, n, outcome: outcome.ok ? 'ok' : 'error' });
       if (agentTerminal(a.status)) return;
       if (c.retryRequested) { c.retryRequested = false; kind = 'retry'; prompt = initialPrompt; continue; }
+      // A turn that finished as it was cut keeps its answer; the message then waits for a resumed turn.
+      if (steered && !outcome.ok && !c.abort.signal.aborted) { await this.note(`${a.name}: stopped after a tool call to deliver the orchestrator's message`); kind = 'steer'; resume = true; prompt = STEER_PROMPT; continue; }
       if (outcome.ok) {
         try {
           let result: unknown = outcome.text;
@@ -515,14 +639,15 @@ export class RunExecution {
           if (result === undefined) throw new Error('missing final output');
           // A turn that stored a result supersedes an earlier attempt's error.
           a.result = result; a.resultStoredAtTurn = n; delete a.error;
-          if (!a.comms.enabled || a.markedDone || c.autoDone && this.bus.uncommitted([a.name]) === 0) await this.finish(c, 'done');
+          // An agent without comms that the orchestrator wrote to too late for this turn reads it in a resumed one.
+          const unread = !a.comms.enabled && this.bus.pending(a.name) > 0 && this.resumable(c) && a.resumes < (c.opts.maxResumes ?? this.config.limits.maxResumesPerAgent);
+          if (!unread && (!a.comms.enabled || a.markedDone || c.autoDone && this.bus.uncommitted([a.name]) === 0)) await this.finish(c, 'done');
           else { await this.status(c, 'idle'); this.scheduleResumes(); }
           return;
         } catch (error) {
           // The repair resumes the thread or session that gave the answer, so its work is kept; a
           // Claude session that was not kept (persistNonComms off) cannot be resumed.
-          const resumable = a.backend === 'codex' || a.comms.enabled || c.launch!.persistNonComms !== false;
-          if (resumable && a.sessionId && repairs++ < this.config.limits.schemaRepairs) { await this.note(`${a.name}: its answer did not match the schema; asking it to correct it`); kind = 'schema-repair'; resume = true; prompt = `Your final message did not match the required JSON schema. Errors: ${(error as Error).message}. Reply with only the corrected JSON object.`; continue; }
+          if (this.resumable(c) && repairs++ < this.config.limits.schemaRepairs) { await this.note(`${a.name}: its answer did not match the schema; asking it to correct it`); kind = 'schema-repair'; resume = true; prompt = `Your final message did not match the required JSON schema. Errors: ${(error as Error).message}. Reply with only the corrected JSON object.`; continue; }
           outcome.error = { kind: 'schema', message: (error as Error).message };
         }
       }
@@ -546,6 +671,14 @@ export class RunExecution {
       prompt = initialPrompt;
     }
   }
+  /** Whether the agent's session can be resumed: a Claude session that was not kept (persistNonComms off) cannot. */
+  private resumable(c: AgentContext) { return Boolean(c.agent.sessionId) && (c.agent.backend === 'codex' || c.agent.comms.enabled || c.launch?.persistNonComms !== false); }
+  /** Cuts a Codex turn after a tool call to deliver the orchestrator's waiting message; see turn(). */
+  private steer(c: AgentContext) {
+    if (c.steering || !c.handle || !c.agent.sessionId || c.abort.signal.aborted || (c.steers ?? 0) >= MAX_STEERS || !this.bus.pendingSteer(c.agent.name)) return;
+    c.steering = true; c.steers = (c.steers ?? 0) + 1;
+    void c.handle.kill().catch(() => {});
+  }
   private finish(c: AgentContext, status: Agent['status']) {
     if (!c.finishing) c.finishing = this.finishNow(c, c.requestedTerminal ?? status);
     return c.finishing;
@@ -553,6 +686,13 @@ export class RunExecution {
   private async finishNow(c: AgentContext, status: Agent['status']) {
     if (agentTerminal(c.agent.status)) return;
     if (status === 'done' && c.agent.result === undefined) throw new Error('cannot complete agent without stored result');
+    // A done agent's scratch folders go before its worktree is snapshot, so none of it lands on its branch;
+    // a failed or cancelled one's stay for inspection.
+    if (status === 'done' && c.scratch?.length) {
+      const { removed, refused } = await cleanup(c.scratch, c.agent.workspace.path, c.scratch.map(folder => ({ path: folder, allowRoot: true })));
+      const failed = refused.filter(r => r.reason !== 'not found');
+      if (removed.length || failed.length) await this.note(`${c.agent.name}: removed ${removed.length} scratch folder${removed.length === 1 ? '' : 's'}${failed.length ? `; kept ${failed.map(r => `${r.path} (${r.reason})`).join(', ')}` : ''}`);
+    }
     if (!c.cached) {
       c.agent.workspace = await finishWorkspace(c.agent.workspace, c.agent.name, status === 'done' && c.agent.access === 'edit');
       if (c.agent.workspace.kind === 'worktree' && c.agent.workspace.repo) await this.event(c.agent.workspace.kept ? 'worktree.kept' : 'worktree.removed', { name: c.agent.name, workspace: c.agent.workspace });
@@ -599,7 +739,7 @@ export class RunExecution {
     await Promise.all([...this.contexts.values()].map(async c => { c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await c.finishing; if (!agentTerminal(c.agent.status)) await this.finish(c, 'cancelled'); }));
     await Promise.allSettled([...this.teams.values()].map(team => team.admission));
     if (status === 'interrupted') for (const c of cut) if (c.agent.status === 'cancelled') c.agent.error = { ...INTERRUPTED };
-    this.manager.scheduler.pause(this.run.id, false); await this.event('run.status', { status });
+    this.manager.scheduler.pause(this.run.id, false); await this.event('run.status', { status, ...this.cancelledReport() });
   }
   async controlAgent(name: string, action: string) {
     const c = this.contexts.get(name); if (!c) throw new Error('unknown agent');
@@ -609,7 +749,7 @@ export class RunExecution {
       else if (c.agent.status === 'idle') { c.task = this.turn(c, c.prompt, Boolean(c.agent.sessionId)); void c.task.catch(e => this.fail(e)); }
       else throw new Error('agent has no active or idle turn to retry');
     } else if (action === 'skip' || action === 'cancel') {
-      c.requestedTerminal = action === 'skip' ? 'skipped' : 'cancelled'; c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await this.finish(c, c.requestedTerminal);
+      c.requestedTerminal = action === 'skip' ? 'skipped' : 'cancelled'; if (action === 'cancel') this.cancelRequested.add(name); c.abort.abort(); const handle = c.handle; await handle?.kill(); await handle?.done; await c.task?.catch(() => {}); await this.finish(c, c.requestedTerminal);
     } else throw new Error('invalid agent action');
     return { status: c.agent.status };
   }

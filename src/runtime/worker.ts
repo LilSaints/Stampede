@@ -55,6 +55,7 @@ const workflow = (ref, args) => rpc('workflow', { ref, args });
 const send = (to, text) => rpc('send', { to, text });
 const board = topic => rpc('board', { topic });
 const workspace = name => rpc('workspace', { name: String(name) });
+const checkpoint = (name, data = null, opts = {}) => rpc('checkpoint', { name, data, opts });
 async function spawnTeam(members, opts = {}) {
   const team = await rpc('spawnTeam', { members, opts: { phase: currentPhase, ...opts } });
   return Object.freeze({ ...team,

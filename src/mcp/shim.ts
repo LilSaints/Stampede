@@ -21,7 +21,9 @@ export async function startShim(home: string, entry: string, role: 'agent' | 'or
     }
   }
   const server = new Server({ name: 'stampede', version: VERSION }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: role === 'agent' ? agentTools : orchestratorTools }));
+  // A worker lists the tools the hub gave it (STAMPEDE_AGENT_TOOLS); the hub refuses any other.
+  const allowed = process.env.STAMPEDE_AGENT_TOOLS?.split(',');
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: role === 'agent' ? agentTools.filter(tool => !allowed || allowed.includes(tool.name)) : orchestratorTools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const input = request.params.arguments ?? {}; validateTool(request.params.name, input, role);
