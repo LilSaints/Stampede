@@ -43,5 +43,15 @@ test('status preserves the orchestrator inbox, idle blockers and durable undeliv
     await call('workflow_control', { runId: first.runId, action: 'cancel' });
     await execution.task;
     assert.equal((await call('workflow_status', { runId: first.runId })).undeliverableMessages, 25);
+    // Each session is shown only the log lines it has not seen; the cache lists and every line wait for verbose.
+    const logged = await call('workflow_run', { cwd, script: 'export const meta={name:"log fixture",description:"log"}; await log("one"); await log("two"); return await agent("fixture:argv", { cache: "never" });' });
+    await hub.manager.active.get(logged.runId)?.task;
+    const fresh = await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'reader' });
+    assert.deepEqual(fresh.log.slice(0, 2), ['one', 'two']); assert.equal(fresh.notCacheable, 1); assert.equal(fresh.verificationFailures, 0);
+    assert.equal(fresh.tokens.output, 3); assert.equal(fresh.tokens.cachedInput, 2);
+    assert.deepEqual((await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'reader' })).log, []);
+    const verbose = await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'reader', verbose: true });
+    assert.deepEqual(verbose.log.slice(0, 2), ['one', 'two']); assert.match(verbose.notCacheable[0].reason, /cache disabled/);
+    assert.deepEqual((await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'other' })).log.slice(0, 2), ['one', 'two']);
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
 });

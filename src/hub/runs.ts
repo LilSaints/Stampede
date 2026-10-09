@@ -269,7 +269,7 @@ export class RunExecution {
     // An agent's worktree as the script needs it to continue that work: branch, commits and path.
     if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name); return a?.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, baseCommit: a.workspace.baseCommit ?? null, commit: a.workspace.commit ?? null, path: a.workspace.path, kept: a.workspace.kept ?? null } : null; }
     if (method === 'checkpoint') return this.checkpoint(params);
-    if (method === 'log') { this.run.log.push(params.message); this.run.log = this.run.log.slice(-100); await this.event('log', params); return; }
+    if (method === 'log') { this.appendLog(params.message); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
     if (method === 'board' || method === 'team.board') return this.bus.entries.filter(e => !params.topic || e.topic === params.topic);
     if (method === 'spawnTeam') {
@@ -361,7 +361,8 @@ export class RunExecution {
     if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0 || opts.timeoutMs > this.config.limits.turnTimeoutMs)) throw new Error('timeoutMs must be positive and no greater than the configured limit');
     if (opts.maxResumes !== undefined && (!Number.isInteger(opts.maxResumes) || opts.maxResumes < 0 || opts.maxResumes > this.config.limits.maxResumesPerAgent)) throw new Error('maxResumes must be an integer within the configured limit');
     if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
-    if (opts.cache !== undefined && !['auto', 'never'].includes(opts.cache)) throw new Error('invalid cache policy');
+    if (opts.cache !== undefined && !['auto', 'never', 'commit'].includes(opts.cache)) throw new Error('invalid cache policy');
+    if (opts.cache === 'commit' && !(opts.isolation === 'worktree' || opts.isolation === undefined && (opts.access === 'edit' || opts.access === 'full'))) throw new Error("cache 'commit' needs a worktree: isolation 'worktree', or edit or full access");
     if (opts.notify !== undefined && typeof opts.notify !== 'boolean') throw new Error('notify must be a boolean');
     if (opts.readWorktrees !== undefined && (!Array.isArray(opts.readWorktrees) || opts.readWorktrees.some(name => typeof name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(name)))) throw new Error('readWorktrees must be a list of agent names');
     if (opts.baseRef !== undefined) {
@@ -441,7 +442,9 @@ export class RunExecution {
   }
   private syncPeer(a: Agent) { this.peers.set(a.name, { name: a.name, backend: a.backend, comms: a.comms.enabled, canMessage: a.comms.canMessage, status: a.status, markedDone: a.markedDone, turn: a.turns.length }); }
   /** A line of the run's log, which workflow_status shows the orchestrator, from the hub rather than the script. */
-  private async note(message: string) { this.run.log.push(message); this.run.log = this.run.log.slice(-100); await this.event('log', { message }); }
+  private async note(message: string) { this.appendLog(message); await this.event('log', { message }); }
+  /** The log keeps its last 100 lines; `logCount` counts every line, so a reader's cursor survives the trim. */
+  private appendLog(message: string) { this.run.log.push(message); this.run.log = this.run.log.slice(-100); this.run.logCount = (this.run.logCount ?? this.run.log.length - 1) + 1; }
   async status(c: AgentContext, status: Agent['status']) {
     c.agent.status = status; c.agent.lastActivityAt = now(); this.syncPeer(c.agent);
     await this.manager.store.write(path.join(this.agentDir(c.agent), 'agent.json'), { ...c.agent, token_sha256: c.tokenHash, prompt_sha256: hash(c.prompt), shared: { tainted: c.tainted } });
@@ -462,8 +465,11 @@ export class RunExecution {
     c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType, base: c.base }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
     if (previousKey !== c.key) c.occ = this.cache.next(c.key);
     c.agent.callKey = c.key; c.agent.callOcc = c.occ;
-    c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && c.agent.access !== 'full' && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
-    if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : inputs.cacheable ? 'unverifiable workspace effects' : 'workspace fingerprint unavailable' });
+    // A full-access agent can change anything, so it is reused only where its call says (cache: 'commit') that
+    // its worktree's commit is its one lasting effect; a resume checks its branch is still at that commit.
+    const fullUnverified = c.agent.access === 'full' && c.opts.cache !== 'commit';
+    c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && !fullUnverified && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
+    if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : !inputs.cacheable ? 'workspace fingerprint unavailable' : fullUnverified ? "full access: unverifiable effects (cache: 'commit' reuses it when its worktree commit is its only lasting effect)" : 'unverifiable workspace effects' });
   }
   async dispatch(c: AgentContext, preReserved?: (id?: string) => void) {
     c.release = preReserved;

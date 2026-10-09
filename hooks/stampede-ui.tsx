@@ -23,7 +23,7 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
     if (!run || !next.ownedRunIds.includes(event.runId) || event.hubSeq <= Math.max(run.seenSeq ?? 0, state.wakeSeen?.[event.runId] ?? 0)) continue;
     let kind = event.type, text = '';
     if (kind === 'run.status' && terminal(event.data.status)) { kind = 'run.terminal'; text = `run ${run.runId} "${run.name}": ${event.data.status}. Get it with workflow_result.${cancelledText(event.data.cancelled)}`; }
-    else if (kind === 'checkpoint.waiting') text = `run ${run.runId} "${run.name}": checkpoint "${clean(event.data.name, 80)}" (#${event.data.occ}) waits for your answer: ${clean(JSON.stringify(event.data.data ?? null), 200)}. Answer it with workflow_answer.`;
+    else if (kind === 'checkpoint.waiting') text = `run ${run.runId} "${run.name}": checkpoint "${clean(event.data.name, 80)}" (#${event.data.occ}) waits for your answer: ${checkpointLine(event.data.data)}. workflow_status shows its data; answer it with workflow_answer.`;
     else if (kind === 'message.accepted' && (event.data.to === 'orchestrator' || event.data.to === '*') && !['orchestrator', 'system'].includes(event.data.from)) { kind = 'message.orchestrator'; text = `run ${run.runId}: message from ${event.data.from} → orchestrator (#${event.data.seq}): ${JSON.stringify(clean(event.data.text, 280))}. Read workflow_messages.`; }
     else if (kind === 'agent.failed') text = `run ${run.runId} "${run.name}": agent ${clean(event.data.name, 40)} failed after ${event.data.attempts} attempt${event.data.attempts === 1 ? '' : 's'} (${clean(event.data.error?.kind ?? 'unknown', 30)}): ${JSON.stringify(clean(event.data.error?.message ?? '', 200))}. Its agent() returned null and the run goes on without it; workflow_result with agent reads any finished agent.`;
     else if (kind === 'agent.done') text = `run ${run.runId} "${run.name}": agent ${clean(event.data.name, 40)} is done. workflow_result with agent reads its result.`;
@@ -42,6 +42,18 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
   if (!limited) { next.wakeLimitNotified = false; next.wakeLimitToastPending = false; }
   else if (!next.wakeLimitNotified) { next.wakeLimitNotified = true; next.wakeLimitToastPending = true; }
   return next;
+}
+/**
+ * A checkpoint's data in one line: its `summary` (or `message`) when the
+ * script gave one, else what it holds by key, else a short value. Raw JSON cut
+ * mid-path tells Claude nothing; workflow_status gives the whole of it.
+ */
+export function checkpointLine(data: any) {
+  const said = data && typeof data === 'object' ? data.summary ?? data.message : undefined;
+  if (typeof said === 'string' && said.trim()) return JSON.stringify(clean(said, 240));
+  if (data && typeof data === 'object' && !Array.isArray(data)) { const keys = Object.keys(data); return keys.length ? `data with ${clean(keys.slice(0, 8).join(', '), 160)}${keys.length > 8 ? ` and ${keys.length - 8} more` : ''}` : 'no data'; }
+  if (Array.isArray(data)) return `a list of ${data.length}`;
+  return data === undefined || data === null ? 'no data' : clean(JSON.stringify(data), 120);
 }
 /** A run end's cancelled agents for Claude, each with where its work is: branch, commit and worktree. */
 export function cancelledText(cancelled: any) {

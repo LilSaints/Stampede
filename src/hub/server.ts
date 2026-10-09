@@ -117,7 +117,15 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       }
       observedSeq = manager.hubSeq;
       const view = await runSummary(run!, input.orchestratorSessionId);
-      result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log: view.log, budget: run!.budget, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, ...(view.checkpoints.length ? { checkpoints: view.checkpoints } : {}), latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, error: run!.error, ...(woke ? { woke } : {}) };
+      // The log lines this session has not been shown (verbose: the last 30), and the cache lists only under verbose.
+      const logTotal = run!.logCount ?? run!.log.length, logNew = Math.min(logTotal - (run!.logSeen?.[input.orchestratorSessionId ?? ''] ?? 0), run!.log.length);
+      const log = (input.verbose ? run!.log.slice(-30) : run!.log.slice(run!.log.length - Math.max(0, logNew)).slice(-20)).map(line => truncate(line, 300));
+      const report = run!.cacheReport;
+      const cache = input.verbose ? report : { notCacheable: report?.notCacheable.length ?? 0, verificationFailures: report?.verificationFailures.length ?? 0 };
+      // Budgets count output tokens, reasoning included; what the agents read is beside them.
+      const tokens = run!.agents.reduce((sum, a) => ({ input: sum.input + a.usage.inputTokens, cachedInput: sum.cachedInput + a.usage.cachedInputTokens, output: sum.output + a.usage.outputTokens, reasoning: sum.reasoning + a.usage.reasoningTokens }), { input: 0, cachedInput: 0, output: 0, reasoning: 0 });
+      result = { status: run!.status, phase: run!.phase, phases: view.phases.map(p => ({ title: p.title, agents: p.counts })), ...(input.verbose ? { agents: view.agents } : {}), log, ...(!input.verbose && logNew > log.length ? { logOmitted: logNew - log.length } : {}), budget: run!.budget, tokens, startedAt: run!.startedAt, elapsedSec: (Date.parse(run!.endedAt ?? new Date().toISOString()) - Date.parse(run!.startedAt!)) / 1000, unreadForOrchestrator: view.unreadForOrchestrator, ...(view.checkpoints.length ? { checkpoints: view.checkpoints } : {}), latestMessages: view.latestMessages, undeliverableMessages: view.undeliverableMessages, admission: view.admission, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...cache, error: run!.error, ...(woke ? { woke } : {}) };
+      if (input.orchestratorSessionId && !ui) run!.logSeen ={ ...run!.logSeen, [input.orchestratorSessionId]: logTotal };
     } else if (name === 'workflow_result' && input.agent !== undefined) {
       // One agent's result, readable while the run goes on; a long one is read from its file.
       const agent = run!.agents.find(a => a.name === input.agent); if (!agent) throw new Error('unknown agent');

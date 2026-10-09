@@ -8,7 +8,7 @@ export const runTerminal = (status: string) => ['completed', 'failed', 'cancelle
 export interface AgentOpts {
   backend?: 'claude' | 'codex'; label?: string; name?: string; role?: string; phase?: string; schema?: Record<string, any>; model?: string; effort?: string;
   isolation?: 'worktree' | 'shared'; access?: 'read-only' | 'edit' | 'full'; cwd?: string; agentType?: string; timeoutMs?: number; maxResumes?: number;
-  comms?: boolean | { canMessage?: string[] | '*'; autoDoneOnIdle?: boolean }; cache?: 'auto' | 'never'; cacheInputs?: string[]; appendSystemPrompt?: string;
+  comms?: boolean | { canMessage?: string[] | '*'; autoDoneOnIdle?: boolean }; cache?: 'auto' | 'never' | 'commit'; cacheInputs?: string[]; appendSystemPrompt?: string;
   /** Wake the orchestrator when this agent is done; overrides the run's `notifyAgents`. Not part of the cache key. */
   notify?: boolean;
   /** Other agents of the run whose worktrees this Claude agent may read (a reviewer of an integrator's branch); all others stay closed. */
@@ -51,7 +51,10 @@ export interface Run {
   title?: string;
   /** false: a resume starts every interrupted agent again rather than continuing its session and worktree. */
   continueInterrupted?: boolean;
-  agents: Agent[]; log: string[]; phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
+  agents: Agent[]; log: string[];
+  /** Every log line ever written (`log` keeps the last 100), and how many of them each orchestrator session has been shown. */
+  logCount?: number; logSeen?: Record<string, number>;
+  phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
   cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };
   notifications?: { hubSeq: number; runId: string; type: string; at: string; data: any }[];

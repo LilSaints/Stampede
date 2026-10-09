@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing';
-import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst, delegates, transcriptItems, toolSummary, tagReply, gridHint } from './stampede-ui';
+import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst, delegates, transcriptItems, toolSummary, tagReply, gridHint, checkpointLine } from './stampede-ui';
 
 // A click: the desktop draws clickable rows (a Client) where the terminal draws Buttons.
 const click = (ui: any, surface: string, key: string, row: string) => surface === 'desktop' ? ui.pointer({ type: 'up', x: 1, y: 0, button: 'left', in: row }) : ui.press({ key });
@@ -165,7 +165,9 @@ test('an agent that fails for good wakes the orchestrator mid-run with a toast',
 test('a waiting checkpoint wakes the orchestrator; a run end names its cancelled agents and where their work is', async () => {
   const runs = [{ ...run(), name: 'review' }];
   const asked = reduce(initialState(), { hubSeq: 1, uiApiVersion: 1, runs }, [{ runId: 'owned', hubSeq: 1, type: 'checkpoint.waiting', data: { name: 'scope', occ: 1, data: { files: 2 } } }], 'owner', 100);
-  expect(asked.pendingWake[0]!.text).toBe('run owned "review": checkpoint "scope" (#1) waits for your answer: {"files":2}. Answer it with workflow_answer.');
+  expect(asked.pendingWake[0]!.text).toBe('run owned "review": checkpoint "scope" (#1) waits for your answer: data with files. workflow_status shows its data; answer it with workflow_answer.');
+  expect(checkpointLine({ summary: 'B8 review found 3 visual defects', findings: ['C:/long/path'] })).toBe('"B8 review found 3 visual defects"');
+  expect(checkpointLine(null)).toBe('no data'); expect(checkpointLine([1, 2])).toBe('a list of 2'); expect(checkpointLine('go?')).toBe('"go?"');
   expect(asked.toastPending?.[0]?.text).toBe('review: checkpoint scope waits for Claude');
   expect(wakeSummary(wakePrompt(asked), asked.runs)).toBe('review: checkpoint scope');
   const cancelled = [{ name: 'fixer', branch: 'stampede/x/fixer', commit: '7dddaed0123456789', worktree: 'C:/Dev/Knive/.stampede/worktrees/x/fixer', kept: true }];

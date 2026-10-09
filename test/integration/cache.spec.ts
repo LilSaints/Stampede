@@ -16,7 +16,7 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
   await git(cwd, ['config', 'user.email', 'fixture@example.invalid']);
   await writeFile(path.join(cwd, 'reviewed.txt'), 'original\n');
   await git(cwd, ['add', '.']); await git(cwd, ['commit', '-m', 'fixture']);
-  const config = defaults(); config.defaultBackend = 'codex';
+  const config = defaults(); config.defaultBackend = 'codex'; config.allowFullAccess = true;
   config.scheduler.maxConcurrent = 4; config.scheduler.perRun = 4; config.scheduler.codex.maxConcurrent = 3;
   const fake = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/fake-codex.mjs'), version: '0.159.2', capabilities: {} };
   const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { codex: fake, claude: { ...fake, entry: path.resolve('test/fake-backends/fake-claude.mjs'), version: '2.1.292' } } });
@@ -51,6 +51,16 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
     assert.equal((await resume(edit.id)).cacheHits, 1);
     await git(workspace.path, ['-c', 'core.hooksPath=', 'commit', '--allow-empty', '-m', 'advance fixture branch']);
     const moved = await resume(edit.id); assert.equal(moved.cacheHits, 0); assert.equal(moved.liveCalls, 1);
+    // A full-access agent is reused only when its call says its worktree commit is its one lasting effect, and that commit still stands.
+    const full = await start('return await agent("fixture:edit",{access:"full"});');
+    assert.equal((await resume(full.id)).cacheHits, 0);
+    const committed = await start('return await agent("fixture:edit",{access:"full",cache:"commit"});');
+    assert.equal((await resume(committed.id)).cacheHits, 1);
+    await git(committed.agents[0].workspace.path, ['-c', 'core.hooksPath=', 'commit', '--allow-empty', '-m', 'advance fixture branch']);
+    assert.equal((await resume(committed.id)).cacheHits, 0);
+    const refused = await hub.manager.start({ cwd, script: meta + 'return await agent("x",{cache:"commit"});' });
+    await hub.manager.active.get(refused.runId)?.task;
+    assert.match(hub.manager.get(refused.runId).error!.message, /cache 'commit' needs a worktree/);
 
     const shared = await start('return await agent("fixture:edit",{access:"edit",isolation:"shared"});');
     const sharedRepeat = await resume(shared.id); assert.equal(sharedRepeat.cacheHits, 0); assert.equal(sharedRepeat.liveCalls, 1);
