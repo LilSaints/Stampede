@@ -17,6 +17,15 @@ test('a worker without comms gets only the Stampede tools the hub gives it, and 
   assert.ok(codex.some(arg => arg.startsWith('mcp_servers.stampede.env=') && arg.includes('"STAMPEDE_AGENT_TOOLS"="cleanup"')));
   assert.ok(!codexArgv(launch('.'), { platform: 'linux' }).some(arg => arg.startsWith('mcp_servers.stampede')));
 });
+test('an edit worker may also write its scratch folders outside its workspace', () => {
+  const dirs = ['C:\\scratch\\a', 'D:\\b'];
+  const claude = claudeArgv({ ...launch('.'), backend: 'claude', access: 'edit', writableDirs: dirs });
+  assert.deepEqual(claude.slice(claude.indexOf('--add-dir'), claude.indexOf('--add-dir') + 4), ['--add-dir', ...dirs, '--allowedTools']);
+  assert.ok(!claudeArgv({ ...launch('.'), backend: 'claude', access: 'edit' }).includes('--add-dir'));
+  const codex = codexArgv({ ...launch('.'), access: 'edit', writableDirs: dirs }, { platform: 'win32' });
+  assert.ok(codex.includes('sandbox_workspace_write.writable_roots=["C:\\\\scratch\\\\a","D:\\\\b"]'));
+  assert.ok(!codexArgv({ ...launch('.'), access: 'full', writableDirs: dirs }).some(arg => arg.startsWith('sandbox_workspace_write')));
+});
 test('Codex resume preserves all options before the resume tail', () => {
   const a = { ...launch('.'), comms: true, token: 'test-token' };
   const start = codexArgv(a, { platform: 'win32' });

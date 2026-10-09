@@ -4,6 +4,7 @@ export function codexArgv(a: AgentLaunch, options: { resumeThreadId?: string; pl
   const argv = [...(a.entry ? [a.entry] : []), 'exec', '--json', '--ignore-user-config'];
   if ((options.platform ?? process.platform) === 'win32') argv.push('-c', `windows.sandbox=${quote(a.windowsSandbox)}`);
   argv.push('--skip-git-repo-check', '-C', a.cwd, '-s', { 'read-only': 'read-only', edit: 'workspace-write', full: 'danger-full-access' }[a.access], '-c', 'approval_policy="never"');
+  if (a.access === 'edit' && a.writableDirs?.length) argv.push('-c', `sandbox_workspace_write.writable_roots=${quote(a.writableDirs)}`);
   if (a.model) argv.push('-m', a.model);
   // The user's own setting is ignored with their config, so it is passed on when configured.
   if (a.approvalsReviewer) argv.push('-c', `approvals_reviewer=${quote(a.approvalsReviewer)}`);

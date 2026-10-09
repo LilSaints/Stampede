@@ -5,6 +5,8 @@ export const zeroUsage = (): Usage => ({ inputTokens: 0, cachedInputTokens: 0, o
 export interface AgentLaunch {
   backend: 'claude' | 'codex'; binary: string; entry?: string; cwd: string;
   access: 'read-only' | 'edit' | 'full'; model?: string; effort?: string; agentType?: string;
+  /** Folders outside `cwd` an edit worker may also write: its scratch folders. */
+  writableDirs?: string[];
   schema?: Schema; schemaPath?: string; lastMessagePath?: string;
   mcpPath: string; settingsPath: string; contract: string; comms: boolean;
   /** The Stampede tools the worker gets: every one with comms, else at most `cleanup`; none, no Stampede server. */

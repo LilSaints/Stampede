@@ -13,7 +13,7 @@ Start a run with `workflow_run`, supplying exactly one of `script`, `scriptPath`
 
 To pause a script for your input between steps, `await checkpoint(name, data, { timeoutMs, default })`: it wakes you with `data`, and resolves to what you send with `workflow_answer` (`runId`, `name`, any JSON `answer`: extra input, or `true` to approve), or to `default` (null) after `timeoutMs` (1 hour; at most 24). `workflow_status` lists waiting checkpoints. A resumed run replays the answer given to the same checkpoint (name, occurrence and data), so its later calls stay cached.
 
-Edit agents can delete what they make: the `cleanup` tool deletes inside their own worktree and the `scratch` folders their call declares (`scratch: ['tmp/fixtures']`, relative to the agent's workspace), which their sandbox may refuse to do itself. A done agent's scratch folders are removed; a failed or cancelled one's stay for inspection.
+Edit agents can delete what they make: the `cleanup` tool deletes inside their own worktree and the `scratch` folders their call declares (`scratch: ['tmp/fixtures']`, relative to the agent's workspace, or absolute), which their sandbox may refuse to do itself. A scratch folder outside the workspace is created before the agent starts and is writable to it. A done agent's scratch folders are removed; a failed or cancelled one's stay for inspection.
 
 Scripts are plain JavaScript. Their first statement must be a literal metadata export:
 

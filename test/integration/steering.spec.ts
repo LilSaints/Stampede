@@ -96,6 +96,14 @@ test('the orchestrator steers workers without comms, answers checkpoints, passes
     const report = JSON.parse(hub.manager.get(cleaned.runId).result as string);
     assert.deepEqual(report.tools, ['cleanup']); assert.equal(report.removed.length, 1); assert.match(report.refused[0].reason, /outside your worktree and scratch/);
     assert.equal(await exists(outside), true); assert.equal(await exists(scratch), false);
+    // A scratch folder outside the worktree exists before an edit worker starts and is writable to it.
+    const away = path.join(root, 'away', 'tmp');
+    const roots = await hub.manager.start({ cwd, script: meta + `return await agent("fixture:argv", { name: "away", backend: "codex", access: "edit", scratch: [${JSON.stringify(away)}] });` });
+    await hub.manager.active.get(roots.runId)?.task;
+    const codexArgs: string[] = JSON.parse(hub.manager.get(roots.runId).result as string).argv;
+    assert.ok(codexArgs.includes(`sandbox_workspace_write.writable_roots=${JSON.stringify([away])}`));
+    assert.ok(hub.manager.get(roots.runId).log.includes('away: removed 1 scratch folder'), 'the folder was made, then removed when the worker was done');
+    assert.equal(await exists(away), false);
 
     // A Claude agent type that lists its tools runs as a copy with the structured-output tool added; every Claude worker gets the inbox hooks.
     await mkdir(path.join(cwd, '.claude', 'agents'), { recursive: true });

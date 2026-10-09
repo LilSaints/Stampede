@@ -23,7 +23,7 @@ export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
     // messaging writes. Explicit tool grants plus edit/shell denials preserve
     // filesystem read-only access while allowing coordination.
     if (a.access === 'read-only') { argv.push('--permission-mode', a.comms ? 'default' : 'plan'); denied.push('Edit', 'Write', 'NotebookEdit', 'Bash', 'PowerShell'); }
-    else { argv.push('--permission-mode', 'acceptEdits'); tools.push('Edit', 'Write', 'NotebookEdit', ...(a.editShellAllow ?? [])); if (!a.editShellAllow?.length) denied.push('Bash', 'PowerShell'); }
+    else { argv.push('--permission-mode', 'acceptEdits', ...(a.writableDirs?.length ? ['--add-dir', ...a.writableDirs] : [])); tools.push('Edit', 'Write', 'NotebookEdit', ...(a.editShellAllow ?? [])); if (!a.editShellAllow?.length) denied.push('Bash', 'PowerShell'); }
     argv.push('--allowedTools', ...tools);
   }
   argv.push('--disallowedTools', ...denied);

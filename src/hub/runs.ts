@@ -13,7 +13,7 @@ import { contract } from '../contract/prompts.js';
 import { agentTools } from '../mcp/tools.js';
 import { externalTools } from '../backends/tool-usage.js';
 import { findAgentFile, withTools } from '../backends/claudeAgents.js';
-import { type CleanupRoot, cleanup, scratchFolders } from './cleanup.js';
+import { type CleanupRoot, cleanup, scratchFolders, within } from './cleanup.js';
 import { claudeContext, claudeReplies, claudeSessionExists, claudeTranscriptSize, claudeWindow, codexContext, codexThreadExists } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
@@ -516,8 +516,13 @@ export class RunExecution {
     // The hub deletes for the agent (cleanup) inside its own worktree and its scratch folders; a shared
     // workspace is the user's checkout, so never there. Scratch folders go when the agent is done.
     const repo = await repoRoot(this.run.cwd).catch(() => undefined);
-    try { c.scratch = scratchFolders(c.opts.scratch, a.workspace.path, [os.homedir(), this.manager.store.home, this.run.cwd, ...(repo ? [repo] : []), a.workspace.path]); }
-    catch (error) { throw Object.assign(error as Error, { kind: 'workspace' }); }
+    // Scratch folders outside the workspace exist from the start and an edit worker may write them as well.
+    let writableDirs: string[] = [];
+    try {
+      c.scratch = scratchFolders(c.opts.scratch, a.workspace.path, [os.homedir(), this.manager.store.home, this.run.cwd, ...(repo ? [repo] : []), a.workspace.path]);
+      writableDirs = c.scratch.filter(folder => within(folder, a.workspace.path) === 'outside');
+      for (const folder of writableDirs) await mkdir(folder, { recursive: true });
+    } catch (error) { throw Object.assign(error as Error, { kind: 'workspace' }); }
     c.cleanupRoots = a.access === 'read-only' ? [] : [...(a.workspace.kind === 'worktree' ? [{ path: a.workspace.path, allowRoot: false }] : []), ...c.scratch.map(folder => ({ path: folder, allowRoot: true }))];
     const cleanupTool = c.cleanupRoots.length > 0 && (a.backend === 'claude' || backend.capabilities.mcpViaFlags !== false);
     // Stampede's tools for this worker: all of them with comms, else only cleanup where it has somewhere to clean.
@@ -543,7 +548,7 @@ export class RunExecution {
     const codexType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, writableDirs, model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
     // The model and effort asked for show until the backend reports the ones it resolved.
     a.model ??= c.launch.model;
     a.effort ??= c.launch.effort;
