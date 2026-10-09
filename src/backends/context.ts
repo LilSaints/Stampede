@@ -25,13 +25,14 @@ export function claudeWindow(event: any): number | undefined {
 /**
  * `codex exec --json` only reports the turn's summed usage. The session's
  * rollout file records each request's `last_token_usage` and the context
- * window, and the turn's model, so the newest of those is read from its tail.
+ * window, and the turn's model and reasoning effort, so the newest of those is
+ * read from its tail.
  * Its `total_token_usage` counts the whole thread, so `spent` is the thread's
  * output tokens so far (its reasoning tokens included), as the budget counts them.
  */
 const rollouts = new Map<string, string>();
 const TAIL_BYTES = 256 * 1024;
-export async function codexContext(threadId: string, home = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')): Promise<(ContextSize & { model?: string; spent?: number }) | undefined> {
+export async function codexContext(threadId: string, home = process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex')): Promise<(ContextSize & { model?: string; effort?: string; spent?: number }) | undefined> {
   if (!/^[\w-]+$/.test(threadId)) return undefined;
   const file = rollouts.get(threadId) ?? await findRollout(path.join(home, 'sessions'), threadId);
   if (!file) return undefined;
@@ -44,9 +45,9 @@ export async function codexContext(threadId: string, home = process.env.CODEX_HO
     await handle.read(buffer, 0, buffer.length, start);
     text = buffer.toString('utf8');
   } finally { await handle.close(); }
-  let context: ContextSize | undefined, model: string | undefined, spent: number | undefined;
+  let context: ContextSize | undefined, model: string | undefined, effort: string | undefined, spent: number | undefined;
   for (const line of text.split('\n').reverse()) {
-    if (context && model) break;
+    if (context && model && effort) break;
     let entry: any; try { entry = JSON.parse(line); } catch { continue; }
     const payload = entry?.payload;
     if (!context && payload?.type === 'token_count' && payload.info?.last_token_usage) {
@@ -55,8 +56,9 @@ export async function codexContext(threadId: string, home = process.env.CODEX_HO
       if (total) spent = total.output_tokens ?? 0;
     }
     if (!model && entry?.type === 'turn_context' && typeof payload?.model === 'string') model = payload.model;
+    if (!effort && entry?.type === 'turn_context' && typeof payload?.effort === 'string') effort = payload.effort;
   }
-  return context ? { ...context, ...(model ? { model } : {}), ...(spent === undefined ? {} : { spent }) } : undefined;
+  return context ? { ...context, ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(spent === undefined ? {} : { spent }) } : undefined;
 }
 /**
  * Claude's stream reports each request's usage as the request starts, so its

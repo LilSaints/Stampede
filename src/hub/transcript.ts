@@ -9,12 +9,26 @@ import type { Agent } from './model.js';
  */
 export interface TranscriptEntry { kind: 'prompt' | 'text' | 'tool' | 'error' | 'turn'; text: string; tool?: string }
 
-const TEXT = 2000, DETAIL = 160, BUDGET = 40000;
+const TEXT = 2000, DETAIL = 240, BUDGET = 40000;
 const clip = (value: unknown, max: number) => { const text = String(value ?? '').replace(/\r/g, ''); return text.length > max ? text.slice(0, max) + '…' : text; };
 /** What a Claude tool acted on: its file, command, pattern, address or query, else its first string input. */
 function subject(input: any) {
   const value = input?.file_path ?? input?.path ?? input?.command ?? input?.pattern ?? input?.url ?? input?.query ?? input?.description ?? input?.to ?? Object.values(input ?? {}).find(item => typeof item === 'string');
   return clip(String(value ?? '').replace(/\s+/g, ' '), DETAIL);
+}
+/**
+ * A command as it was written, without the shell Codex runs it in
+ * (`"C:\\…\\pwsh.exe" -Command "…"`, `/bin/bash -lc '…'`). Codex escapes `\` and
+ * `"` inside a double-quoted argument, so those are unescaped there.
+ */
+export function unwrapShell(command: string) {
+  const match = /^\s*("[^"]+"|\S+)\s+((?:-(?:NoProfile|NoLogo|NonInteractive|ExecutionPolicy\s+\S+)\s+)*)(?:-Command|-c|-lc|\/c)\s+([\s\S]+)$/i.exec(command);
+  const shell = match?.[1]!.replace(/"/g, '').split(/[\\/]+/).pop() ?? '';
+  if (!match || !/^(pwsh|powershell|bash|zsh|sh|cmd)(\.exe)?$/i.test(shell)) return command;
+  const inner = match[3]!.trim();
+  if (inner.length > 1 && inner.startsWith('"') && inner.endsWith('"')) return inner.slice(1, -1).replace(/\\(["\\])/g, '$1');
+  if (inner.length > 1 && inner.startsWith("'") && inner.endsWith("'")) return inner.slice(1, -1);
+  return inner;
 }
 const toolName = (name: string) => name.startsWith('mcp__stampede__') ? `Stampede ${name.slice(15)}` : name.startsWith('mcp__') ? name.slice(5).replace('__', ' ') : name;
 /** A backend's stream events as transcript entries: Claude's stream-json, or Codex's exec --json. */
@@ -33,7 +47,7 @@ export function streamEntries(backend: Agent['backend'], event: any): Transcript
   if (event?.type !== 'item.completed') return [];
   const item = event.item ?? {};
   if (item.type === 'agent_message') return item.text?.trim() ? [{ kind: 'text', text: clip(item.text, TEXT) }] : [];
-  if (item.type === 'command_execution') return [{ kind: 'tool', tool: 'Shell', text: clip(String(item.command ?? '').replace(/\s+/g, ' '), DETAIL) }, ...(item.exit_code ? [{ kind: 'error' as const, text: `exit ${item.exit_code}: ${clip(item.aggregated_output, 400)}` }] : [])];
+  if (item.type === 'command_execution') return [{ kind: 'tool', tool: 'Shell', text: clip(unwrapShell(String(item.command ?? '')).replace(/\s+/g, ' '), DETAIL) }, ...(item.exit_code ? [{ kind: 'error' as const, text: `exit ${item.exit_code}: ${clip(item.aggregated_output, 400)}` }] : [])];
   if (item.type === 'file_change') return [{ kind: 'tool', tool: 'Edit', text: clip((item.changes ?? []).map((change: any) => change?.path).filter(Boolean).join(', '), DETAIL) }];
   if (item.type === 'mcp_tool_call') return [{ kind: 'tool', tool: toolName(`mcp__${item.server}__${item.tool}`), text: subject(item.arguments) }];
   if (item.type === 'web_search') return [{ kind: 'tool', tool: 'Web search', text: clip(item.query, DETAIL) }];

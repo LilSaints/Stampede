@@ -22,8 +22,8 @@ export interface Agent {
   status: AgentStatus; sessionId?: string; markedDone: boolean; result?: unknown; resultStoredAtTurn?: number; teamId?: string;
   usage: Usage; resumes: number; stopBlocks: number; lastActivityAt: string; error?: { kind: string; message: string; blockedBy?: string[]; waitedMs?: number };
   externalTools?: string[];
-  /** The resolved model and its latest request's size, for the UI. */
-  model?: string; context?: { tokens: number; window?: number };
+  /** The resolved model, its reasoning effort and its latest request's size, for the UI. */
+  model?: string; effort?: string; context?: { tokens: number; window?: number };
   /** The call's cache key and occurrence, by which a resumed run finds this agent again. */
   callKey?: string; callOcc?: number;
   /** The interrupted agent of an earlier run whose session (and worktree) this one continued instead of starting again. */

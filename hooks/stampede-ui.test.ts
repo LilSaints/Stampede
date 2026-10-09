@@ -1,5 +1,5 @@
 import { test, expect, mock } from 'claude-code/testing';
-import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst, delegates } from './stampede-ui';
+import { initialState, reduce, wakePrompt, shouldWake, statusText, cells, cellState, gridSvg, modelName, contextFull, notice, wakeSummary, newestFirst, delegates, transcriptItems, toolSummary } from './stampede-ui';
 
 // A click: the desktop draws clickable rows (a Client) where the terminal draws Buttons.
 const click = (ui: any, surface: string, key: string, row: string) => surface === 'desktop' ? ui.pointer({ type: 'up', x: 1, y: 0, button: 'left', in: row }) : ui.press({ key });
@@ -17,11 +17,14 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   on('ui.render', () => ({ type: 'Box', props: {}, children: [] }) as any);
   const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'AbovePrompt', props: { bodyColumns: 100 } as any });
   const drawn = JSON.stringify(await ui.drawn());
-  for (const text of ['review', '1 running · 1/2 done · 2m 0s', 'View', 'Show panel']) expect(drawn.includes(text)).toBe(true);
+  for (const text of ['review', '"1 running"', '"1/2 done"', '2m 0s', 'Show panel']) expect(drawn.includes(text)).toBe(true);
   expect(drawn.includes('other')).toBe(false);
-  // A row's View opens the pane on its run.
-  await ui.press({ key: 'view-0' });
-  expect(state.paneOpen).toBe(true); expect(state.openRuns?.[0]).toBe('owned');
+  // A row has no View of its own: the panel's toggle is enough. A live run's
+  // time counts up on the desktop's own clock.
+  expect(await ui.find({ key: 'view-0' })).toBeUndefined(); expect(drawn.includes('"View"')).toBe(false);
+  if (surface === 'desktop') expect(drawn.includes('"since"')).toBe(true);
+  await ui.press({ key: 'panel' });
+  expect(state.paneOpen).toBe(true);
   // The pane's own toggle is on the band whatever the rows, and hides it.
   await ui.redraw(); const open = JSON.stringify(await ui.drawn());
   expect(open.includes('Hide panel')).toBe(true); expect(open.includes('"Hide"')).toBe(false);
@@ -33,7 +36,7 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   // A finished run keeps a row to reopen the pane from, until dismissed.
   state = { ...state, runs: { ...state.runs, owned: { ...owned, status: 'completed', endedAt: '2026-10-08T00:01:30Z' } } }; version++;
   await ui.redraw(); const finished = JSON.stringify(await ui.drawn());
-  for (const text of ['review', 'Completed · 2 agents · 1m 30s', 'View']) expect(finished.includes(text)).toBe(true);
+  for (const text of ['review', '"Completed"', '"2 agents"', '"1m 30s"']) expect(finished.includes(text)).toBe(true);
   await ui.press({ key: 'dismiss-0' });
   // Removed, it leaves the band (and the pane).
   await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('review')).toBe(false);
@@ -45,6 +48,23 @@ for (const surface of ['terminal', 'desktop'] as const) test(`band shows one row
   const extra = Object.fromEntries(['a', 'b', 'c', 'd'].map((id, i) => [id, { ...run(id), name: `extra-${id}`, startedAt: `2026-10-08T00:00:0${i}Z` }]));
   state = { ...state, paneOpen: false, ownedRunIds: ['d', 'c', 'b', 'a', 'owned'], runs: { ...state.runs, ...extra } }; version++;
   await ui.redraw(); expect(JSON.stringify(await ui.drawn()).includes('1 more run')).toBe(true);
+  // Status, progress and time are columns as wide as their longest entry, so they line up across rows.
+  state = { ...state, runs: { ...state.runs, d: { ...(state.runs as any).d, agents: [...Array(10).fill({ status: 'done' }), ...Array(2).fill({ status: 'queued' })] } } as typeof state.runs }; version++;
+  await ui.redraw();
+  const keyed = (pattern: RegExp) => (node: any): any[] => pattern.test(node?.props?.key ?? '') ? [node] : (node?.children ?? []).flatMap(keyed(pattern));
+  const columns = keyed(/^band-facts-\d+$/)(await ui.drawn()).map(facts => facts.children.map((cell: any) => cell.props.width));
+  expect(columns).toEqual([[9, 10, 7], [9, 10, 7], [9, 10, 7]]);
+  expect(keyed(/^band-\d+$/)(await ui.drawn()).every(row => row.props.flexDirection !== 'column')).toBe(true);
+  // A narrower chat puts the facts on a line under the name, then drops the grid as well.
+  for (const [bodyColumns, grid] of [[50, true], [30, false]] as const) {
+    const narrow = await $.ui.mount({ plugin: 'stampede', surface, component: 'AbovePrompt', props: { bodyColumns } as any });
+    const tree = await narrow.drawn();
+    expect(keyed(/^band-\d+$/)(tree).every(row => row.props.flexDirection === 'column')).toBe(true);
+    expect(keyed(/^band-facts-\d+$/)(tree).length).toBe(3);
+    const grids = (node: any): number => (['Svg', 'Raster'].includes(node?.type) ? 1 : 0) + (node?.children ?? []).reduce((n: number, child: any) => n + grids(child), 0);
+    expect(grids(tree)).toBe(grid ? 3 : 0);
+    await narrow.unmount();
+  }
   await ui.press({ key: 'panel' });
   expect(state.paneOpen).toBe(true);
   // Held-back updates only show while wakes are off or limited.
@@ -355,6 +375,8 @@ test('agent cells follow the Workflow states and scale past the limit', async ()
   const svg = gridSvg(scaled, 16);
   expect(svg.width).toBe(16 * 8 - 2);
   if (svg.source.includes('"') || svg.source.length > 2000) throw new Error('grid source is escaped or too large');
+  // A cell resting under the pointer names its state.
+  for (const hint of ['Done', 'Queued', 'Failed or stopped']) expect(svg.source.includes(`<title>${hint}</title>`)).toBe(true);
 });
 for (const surface of ['terminal', 'desktop'] as const) test(`workflow_run chat row is a live card that opens the pane on ${surface}`, async ($, on) => {
   mock.clock(on, { now: Date.parse('2026-10-08T00:01:05Z') });
@@ -401,13 +423,13 @@ test('expanded phases list each agent with its model and context size', async ($
   expect(modelName({ backend: 'codex' })).toBe('—');
   expect(contextFull({ context: { tokens: 210000, window: 258400 } })).toBe(true);
   expect(contextFull({ context: { tokens: 16789, window: 258400 } })).toBe(false);
-  const fixture: any = { ...run(), agents: [{ name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', status: 'running', tokens: 1, context: { tokens: 46871, window: 1000000 } }, { name: 'critic', backend: 'codex', status: 'queued', tokens: 0 }] };
+  const fixture: any = { ...run(), agents: [{ name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', effort: 'xhigh', status: 'running', tokens: 1, context: { tokens: 46871, window: 1000000 } }, { name: 'critic', backend: 'codex', status: 'queued', tokens: 0 }] };
   const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
   on('state.get', () => ({ value: { value: state, version: 1 } }));
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
     const drawn = JSON.stringify(await ui.drawn());
-    for (const text of ['Context', 'opus-5-5', '46.9k', 'critic', '—']) expect(drawn.includes(text)).toBe(true);
+    for (const text of ['"Effort"', '"xhigh"', 'Context', 'opus-5-5', '46.9k', 'critic', '—']) expect(drawn.includes(text)).toBe(true);
     await ui.unmount();
   }
 });
@@ -431,10 +453,11 @@ test('a desktop that attaches after session start still starts the UI once', asy
   await $.session.attach({ surface: 'mobile', clientId: 'phone' });
   expect(commands).toBe(1);
 });
-// The desktop nests the table in the card, the Phases block and the phase, so
-// it stacks at a wider pane than the terminal does. Nothing is dropped: the
-// stacked row carries the model, context and time on its second line.
-for (const [surface, narrow, wide] of [['terminal', 45, 46], ['desktop', 51, 52]] as const) test(`the agent table keeps every column, then stacks, as the ${surface} pane narrows`, async ($, on) => {
+// The desktop nests the table in the card, the Phases block and the phase,
+// pads each row for its hover highlight and adds its chevron, so it stacks at
+// a wider pane than the terminal does. Nothing is dropped: the stacked row
+// carries the model, context and time on its second line.
+for (const [surface, narrow, wide] of [['terminal', 52, 53], ['desktop', 62, 63]] as const) test(`the agent table keeps every column, then stacks, as the ${surface} pane narrows`, async ($, on) => {
   mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), phases: [{ title: 'Explore' }], log: ['11 explorers inventory the desktop'], agents: [{ name: 'shell', backend: 'codex', model: 'gpt-fixture', status: 'running', phase: 'Explore', tokens: 1, context: { tokens: 20400 } }, { name: 'tools', backend: 'codex', status: 'queued', phase: 'Explore', tokens: 0 }] };
   const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
@@ -480,6 +503,10 @@ for (const surface of ['terminal', 'desktop'] as const) test(`agent names carry 
   expect(drawn.includes('Retrying')).toBe(true);
   for (const glyph of ['✓', '✕', '· retrying', '· recovered']) expect(drawn.includes(glyph)).toBe(false);
   expect(drawn.includes('"color":"error"')).toBe(false);
+  // A finished agent's whole row (name, model, effort, context, time) is a step fainter than a working one's.
+  expect(drawn.split(surface === 'desktop' ? '"color":"#7a7a7acc"' : '"color":"subtle"').length - 1).toBe(5);
+  // On the desktop each row lights under the pointer.
+  if (surface === 'desktop') expect(drawn.split('"hover":{"backgroundColor":"#80808024"}').length - 1).toBe(2);
   fixture.agents[0].status = 'failed';
   await ui.redraw(); drawn = JSON.stringify(await ui.drawn());
   expect(drawn.includes('Retrying')).toBe(false);
@@ -610,7 +637,44 @@ for (const surface of ['terminal', 'desktop'] as const) test(`an agent's name op
   expect(state.transcripts?.['stampede-t-owned-worker']?.entries.length).toBe(4);
   await ui.unmount();
   const pane = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede-t-owned-worker', props: { bodyColumns: 100, title: 'Explore the shell', isFocused: true, placement: 'dock' } as any });
-  const shown = JSON.stringify(await pane.drawn());
-  for (const text of ['review · gpt-6.1-sol · Working', 'Inventory the shell', 'Shell', 'rg --files src', 'Found **12** views.', 'exit 1: no such file', 'Working…']) expect(shown.includes(text)).toBe(true);
+  let shown = JSON.stringify(await pane.drawn());
+  for (const text of ['review · gpt-6.1-sol · Working', 'Inventory the shell', 'Ran a command', 'Found **12** views.', 'exit 1: no such file', 'Working…']) expect(shown.includes(text)).toBe(true);
+  // Tool calls fold into one line, as the desktop chat folds its own; a click opens it on each call.
+  expect(shown.includes('rg --files src')).toBe(false);
+  await click(pane, surface, 'fold-1', 'fold-1-row'); await pane.redraw();
+  expect(state.transcripts?.['stampede-t-owned-worker']?.open).toEqual(['g1']);
+  shown = JSON.stringify(await pane.drawn());
+  for (const text of ['"Shell"', 'rg --files src']) expect(shown.includes(text)).toBe(true);
+  // A long prompt folds to its first lines until opened.
+  const long = Array.from({ length: 20 }, (_, i) => `Line ${i} of the brief`).join('\n');
+  state = { ...state, transcripts: { ...state.transcripts, 'stampede-t-owned-worker': { ...state.transcripts!['stampede-t-owned-worker']!, entries: [{ kind: 'prompt', text: long }] } } }; version++;
+  await pane.redraw(); shown = JSON.stringify(await pane.drawn());
+  expect(shown.includes('Show more')).toBe(true); expect(shown.includes('Line 19')).toBe(false);
+  await click(pane, surface, 'fold-0', 'fold-0-row'); await pane.redraw(); shown = JSON.stringify(await pane.drawn());
+  expect(shown.includes('Show less')).toBe(true); expect(shown.includes('Line 19')).toBe(true);
   await pane.unmount();
+});
+test('a run of tool calls reads as the desktop folds it, with its errors kept in order', async () => {
+  const entries = [{ kind: 'text', text: 'Looking.' }, { kind: 'tool', tool: 'Shell', text: 'git status' }, { kind: 'error', text: 'exit 1: no' }, { kind: 'tool', tool: 'Read', text: 'C:/x/brief.md' }, { kind: 'tool', tool: 'Grep', text: 'foo' }, { kind: 'tool', tool: 'Shell', text: 'npm test' }, { kind: 'text', text: 'Done.' }, { kind: 'error', text: 'turn failed' }] as const;
+  const items = transcriptItems([...entries], 10);
+  expect(items.map(item => [item.kind, item.at])).toEqual([['text', 10], ['tools', 11], ['text', 16], ['error', 17]]);
+  const group = items[1] as Extract<typeof items[number], { kind: 'tools' }>;
+  expect(group.lines.map(line => line.kind)).toEqual(['tool', 'error', 'tool', 'tool', 'tool']);
+  expect(toolSummary(group.lines)).toBe('Ran 2 commands, read brief.md, searched code');
+  expect(toolSummary([{ kind: 'tool', tool: 'Edit', text: 'a.ts, b.ts' }, { kind: 'tool', tool: 'Write', text: 'src/run5_args.py' }])).toBe('Edited 2 files, wrote run5_args.py');
+});
+test(`every phase of a card shares the table's column widths, so the columns line up`, async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const fixture: any = { ...run(), phases: [{ title: 'Implement' }, { title: 'Review' }], agents: [{ name: 'coder', backend: 'codex', model: 'gpt-6-astra', effort: 'high', status: 'done', phase: 'Implement', tokens: 1 }, { name: 'reviewer', backend: 'claude', model: 'claude-opus-5-5', status: 'running', phase: 'Review', tokens: 1 }] };
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'], expandedPhases: { 'owned:Implement': true, 'owned:Review': true } };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  const headers = (node: any, label: string): number[] => [...(node?.type === 'Box' && node.children?.[0]?.type === 'Text' && node.children[0].children?.[0] === label ? [node.props.width] : []), ...(node?.children ?? []).flatMap((child: any) => headers(child, label))];
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns: 100, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+    const tree = await ui.drawn();
+    expect(headers(tree, 'Model')).toEqual([11, 11]);
+    expect(headers(tree, 'Effort')).toEqual([6, 6]);
+    expect(headers(tree, 'Time')).toEqual([7, 7]);
+    await ui.unmount();
+  }
 });

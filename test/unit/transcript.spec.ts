@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { streamEntries } from '../../src/hub/transcript.js';
+import { streamEntries, unwrapShell } from '../../src/hub/transcript.js';
 
 test('Claude stream events become transcript entries: text, tools by what they act on, errors; subagents and thinking left out', () => {
   assert.deepEqual(streamEntries('claude', { type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'hm' }, { type: 'text', text: 'Reading it.' }, { type: 'tool_use', name: 'Read', input: { file_path: 'src/a.ts' } }, { type: 'tool_use', name: 'mcp__stampede__send_message', input: { to: 'critic', text: 'look' } }] } }), [
@@ -13,4 +13,11 @@ test('Codex stream items become transcript entries, a failed command with its ex
   assert.deepEqual(streamEntries('codex', { type: 'item.completed', item: { type: 'command_execution', command: 'npm  test', exit_code: 1, aggregated_output: 'failed' } }), [{ kind: 'tool', tool: 'Shell', text: 'npm test' }, { kind: 'error', text: 'exit 1: failed' }]);
   assert.deepEqual(streamEntries('codex', { type: 'item.completed', item: { type: 'file_change', changes: [{ path: 'a.ts' }, { path: 'b.ts' }] } }), [{ kind: 'tool', tool: 'Edit', text: 'a.ts, b.ts' }]);
   assert.deepEqual(streamEntries('codex', { type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } }), []);
+});
+test('a Codex command reads as written, without the shell it runs in', () => {
+  assert.equal(unwrapShell(String.raw`"C:\\Users\\Marco\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "rg -n 'a|b' C:\\src; git status --short"`), String.raw`rg -n 'a|b' C:\src; git status --short`);
+  assert.equal(unwrapShell(String.raw`"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Write-Output \"hi\""`), 'Write-Output "hi"');
+  assert.equal(unwrapShell(`/bin/bash -lc 'npm test -- --grep "pane"'`), 'npm test -- --grep "pane"');
+  assert.equal(unwrapShell('npm  test'), 'npm  test');
+  assert.equal(unwrapShell('git -c core.pager=cat log'), 'git -c core.pager=cat log');
 });

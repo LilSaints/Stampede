@@ -331,6 +331,7 @@ export class RunExecution {
       if (!found || this.codexRead.get(a.id)?.n !== n) return;
       a.context = { tokens: found.tokens, ...(found.window ? { window: found.window } : {}) };
       a.model = found.model ?? a.model;
+      a.effort = found.effort ?? a.effort;
       // The rollout counts the whole thread: the turns already ended on it are in `usage`.
       const open = a.turns.at(-1);
       if (!final && found.spent !== undefined && open && !open.endedAt) a.liveTokens = Math.max(0, found.spent - a.turns.filter(t => t.endedAt && t.outcome?.sessionId === a.sessionId).reduce((sum, t) => sum + t.outcome!.usage.outputTokens, 0));
@@ -436,8 +437,9 @@ export class RunExecution {
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
     c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, model: c.opts.model ?? agentType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? agentType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType: c.opts.agentType, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId) }) + '\n' + (agentType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
-    // The model asked for shows until the backend reports the one it resolved.
+    // The model and effort asked for show until the backend reports the ones it resolved.
     a.model ??= c.launch.model;
+    a.effort ??= c.launch.effort;
     // An edit agent on Claude with no shell rule can change files but not build or test them.
     if (a.backend === 'claude' && a.access === 'edit' && !c.launch.editShellAllow?.length) await this.note(`${a.name}: edit access with no shell (claude.editShellAllow is empty), so it cannot run builds or tests`);
   }
