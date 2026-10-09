@@ -346,14 +346,14 @@ function runCard($: Engine, elements: any, surface: string, run: any, now: numbe
   const grid = <Box paddingTop={1}>{gridElement(elements, surface, `grid-${key}`, [...cells(run.agents, now, 35 * 8), ...(live ? ['ghost' as const] : [])], 34, 38)}</Box>;
   // On the desktop the whole header is the click target that opens the pane.
   if (surface !== 'terminal' && elements.Client) return <Box key={key} flexDirection="column" width={40} {...CARD} hover={{ backgroundColor: CARD_HOVER }}>
-    <elements.Client key={`open-${run.runId}`} module="./row.tsx" props={{ id: `open:${run.runId}`, title: [{ text: clean(run.name, 60) }], detail: [{ text: 'Workflow  ', dim: true }, ...(run.status === 'running' ? [] : [{ text: `${statusLabel(run.status)}  `, ...(run.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: String(n) }, { text: ` agent${n === 1 ? '' : 's'}  ${runTime(run, now)}`, dim: true }], right: [{ text: '›', dim: true }] }} />
+    <elements.Client key={`open-${run.runId}`} module="./row.tsx" width="100%" props={{ id: `open:${run.runId}`, title: [{ text: clean(run.name, 120) }], detail: [{ text: 'Workflow  ', dim: true }, ...(run.status === 'running' ? [] : [{ text: `${statusLabel(run.status)}  `, ...(run.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: String(n) }, { text: ` agent${n === 1 ? '' : 's'}  ${runTime(run, now)}`, dim: true }], right: [{ text: '›', dim: true }] }} />
     {grid}
   </Box>;
   return <Box key={key} flexDirection="column" width={40} borderStyle="round" borderDimColor paddingX={1}>
     <Box justifyContent="space-between" gap={1}>
-      <Box flexDirection="column" flexShrink={1}>
-        <Text wrap="truncate">{clean(run.name, 60)}</Text>
-        <Text dimColor>{'Workflow · '}{run.status === 'running' ? '' : <Text {...(run.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{`${statusLabel(run.status)} · `}</Text>}<Text>{String(n)}</Text>{` agent${n === 1 ? '' : 's'} · ${runTime(run, now)}`}</Text>
+      <Box flexDirection="column" flexShrink={1} minWidth={0}>
+        <Text wrap="wrap">{clean(run.name, 120)}</Text>
+        <Text dimColor wrap="wrap">{'Workflow · '}{run.status === 'running' ? '' : <Text {...(run.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{`${statusLabel(run.status)} · `}</Text>}<Text>{String(n)}</Text>{` agent${n === 1 ? '' : 's'} · ${runTime(run, now)}`}</Text>
       </Box>
       <Button key={`open-${run.runId}`} plain onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, run.runId) })).then(() => openPane($)); }}>›</Button>
     </Box>
@@ -483,7 +483,7 @@ export const register: Register = (on, options) => {
         const progress = done ? `${statusLabel(run.status)} · ${c.total} agent${c.total === 1 ? '' : 's'}` : `${progressText(c)}${run.status === 'paused' ? ' · Paused' : ''}`;
         return <Box key={`band-${i}`} gap={2} alignItems="center">
           <Box width={event.surface === 'terminal' ? 23 : 12} flexShrink={0}>{gridElement(elements, event.surface, `band-grid-${i}`, [...cells(run.agents, now, 11), ...(done ? [] : ['ghost' as const])], 12, 23)}</Box>
-          <Box flexGrow={1} flexShrink={1} minWidth={0}><Text wrap="truncate" dimColor={done}>{clean(run.name, 40)}</Text></Box>
+          <Box flexGrow={1} flexShrink={1} minWidth={0}><Text wrap="wrap" dimColor={done}>{clean(run.name, 120)}</Text></Box>
           <Text dimColor>{`${progress} · ${runTime(run, now)}`}</Text>
           {/* View, and × for a completed run alone, start the controls column every line shares. */}
           <Box width={BAND_CONTROLS} flexShrink={0} gap={2}>
@@ -494,10 +494,10 @@ export const register: Register = (on, options) => {
       })}
       {/* The panel's own toggle, on every band whatever its rows, beside the runs that have no row. */}
       <Box gap={2}>
-        <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{earlier.length ? `${earlier.length} ${rows.length ? 'more' : 'recent'} run${earlier.length === 1 ? '' : 's'}${earlierLive ? ` · ${earlierLive} running` : ''}` : ''}</Text></Box>
+        <Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor wrap="wrap">{earlier.length ? `${earlier.length} ${rows.length ? 'more' : 'recent'} run${earlier.length === 1 ? '' : 's'}${earlierLive ? ` · ${earlierLive} running` : ''}` : ''}</Text></Box>
         <Box width={BAND_CONTROLS} flexShrink={0}><Button key="panel" plain onPress={() => { void (held.paneOpen ? change($, s => ({ ...s, paneOpen: false })).then(() => $.ui.close({ id: 'stampede' })) : openPane($)); }}>{held.paneOpen ? 'Hide panel' : 'Show panel'}</Button></Box>
       </Box>
-      {alert && !held.compactBand && <Box gap={2}><Box flexShrink={1} minWidth={0}><Text color="warning" wrap="truncate">{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text></Box><Button key="dismiss-alert" plain onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}
+      {alert && !held.compactBand && <Box gap={2}><Box flexShrink={1} minWidth={0}><Text color="warning" wrap="wrap">{clean(alert.data.hint ?? alert.data.error?.message ?? 'Backend unavailable', 160)}</Text></Box><Button key="dismiss-alert" plain onPress={() => { void change($, s => ({ ...s, dismissedAlertSeq: alert.hubSeq })); }}>Dismiss</Button></Box>}
       {waiting && <Box gap={2}><Text dimColor>{`${held_back.length} Stampede update${held_back.length === 1 ? '' : 's'} for Claude · ${held.wakeEnabled ? 'wake limit reached' : 'wakes off'}`}</Text><Button key="wake" plain onPress={() => { void flush($, true); }}>Send to Claude</Button></Box>}
     </Box>;
   });
@@ -515,9 +515,9 @@ export const register: Register = (on, options) => {
     if (!open) return <Text dimColor>This transcript is no longer open</Text>;
     const run = held.runs[open.runId], agent = run?.agents.find((a: any) => a.name === open.agent);
     const working = !!agent && isLive(agent) && cellState(agent, now) !== 'done';
-    const about = [clean(run?.name ?? open.runId, 60), open.model ? modelName({ model: open.model }) : open.backend, agent ? (agent.status === 'failed' ? 'Failed' : working ? 'Working' : 'Done') : ''].filter(Boolean).join(' · ');
+    const about = [clean(run?.name ?? open.runId, 120), open.model ? modelName({ model: open.model }) : open.backend, agent ? (agent.status === 'failed' ? 'Failed' : working ? 'Working' : 'Done') : ''].filter(Boolean).join(' · ');
     return <Box flexDirection="column" gap={1}>
-      <Text dimColor wrap="truncate">{about}</Text>
+      <Text dimColor wrap="wrap">{about}</Text>
       {open.omitted > 0 && <Text dimColor>{`${open.omitted} earlier entr${open.omitted === 1 ? 'y' : 'ies'} not shown`}</Text>}
       {!open.entries.length && <Text dimColor>{open.fetched ? 'Nothing yet' : 'Loading…'}</Text>}
       {open.entries.map((entry, i) => entry.kind === 'prompt'
@@ -538,11 +538,14 @@ export const register: Register = (on, options) => {
     const live = owned.filter(r => !terminal(r.status)).slice(0, 8);
     const finished = owned.filter(r => terminal(r.status) && !held.dismissedRuns?.includes(r.runId)), completed = finished.filter(r => r.status === 'completed');
     const openIds = held.openRuns ?? [];
-    // Columns drop as the table narrows, as the built-in table's do: Model,
-    // then the stacked layout. The table sits inside the run card, and on the
-    // desktop inside the Phases block and its phase too, whose rounded edges
-    // take about ten cells across.
-    const width = (event.props as any).bodyColumns ?? 100, table = width - (desktop ? 10 : 4), stacked = table < 32, showModel = table >= 48;
+    // Nothing is dropped or cut as the pane narrows: text wraps onto more
+    // lines. The agent table keeps its four columns while the name column has
+    // NAME_MIN cells, then stacks each agent (its name, then model, context
+    // and time on the next line). The table sits inside the run card, and on
+    // the desktop inside the Phases block and its phase too, whose rounded
+    // edges take about ten cells across. A live run's Pause and Stop move
+    // below its name where they would squeeze it.
+    const width = (event.props as any).bodyColumns ?? 100, table = width - (desktop ? 10 : 4), controlsBelow = width < 64, NAME_MIN = 14;
     const now = await $.clock.now();
     const dim = !held.hub.ok, busy = held.actionPending || held.hub.versionMismatch;
     // A phase opens by default while its run is live and it has unfinished
@@ -567,7 +570,7 @@ export const register: Register = (on, options) => {
       const messages = Math.min((run.messages ?? []).length, 6, messagesLeft); messagesLeft -= messages;
       plans.set(id, { phases, rows, grids, messages, more: groups.length - phases.length });
     }
-    const col = (text: string, w: number, color?: string) => <Box width={w} flexShrink={0}><Text wrap="truncate" {...(color ? { color } : { dimColor: true })}>{text}</Text></Box>;
+    const col = (text: string, w: number, color?: string) => <Box width={w} flexShrink={0}><Text wrap="wrap" {...(color ? { color } : { dimColor: true })}>{text}</Text></Box>;
     const remove = (ids: string[]) => change($, s => ({ ...s, dismissedRuns: [...new Set([...(s.dismissedRuns ?? []), ...ids])].slice(-100), openRuns: s.openRuns ? s.openRuns.filter(id => !ids.includes(id)) : null }));
     // Every key in a card's detail names its run, so open cards never share one.
     const detail = (run: any) => {
@@ -586,32 +589,35 @@ export const register: Register = (on, options) => {
           const states = cells(agents, now, 64);
           const stalled = states.includes('stalled'), errored = states.includes('error');
           const drawGrid = grids[index];
+          // The Model column is as wide as the longest model shown; Context and Time take 7 each, with 3 gaps.
+          const modelWidth = Math.min(14, Math.max(5, ...agents.slice(0, shown).map((a: any) => modelName(a).length)));
+          const stacked = table - modelWidth - 17 < NAME_MIN;
           // On the desktop a phase is one rounded block, its row, grid and table
           // inside: tinted while open, lit under the pointer while closed.
           return <Box key={`phase-${id}-${index}`} flexDirection="column" marginTop={index ? 1 : 0} {...(desktop ? { ...ROUNDED, ...(open ? { backgroundColor: CARD.backgroundColor } : { hover: { backgroundColor: CARD_HOVER } }) } : {})}>
             {desktop
-              ? <Box><elements.Client key={`phase-row-${id}-${index}`} module="./row.tsx" flexGrow={1} props={{ id: `phase:${phase.id}`, title: [{ text: clean(phase.title, 60), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total} done`, dim: true }] }} /></Box>
+              ? <Box><elements.Client key={`phase-row-${id}-${index}`} module="./row.tsx" width="100%" props={{ id: `phase:${phase.id}`, title: [{ text: clean(phase.title, 120), ...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {}) }], right: [{ text: `${c.done}/${c.total} done`, dim: true }] }} /></Box>
               : <Box justifyContent="space-between" gap={1}>
-                <Box flexShrink={1}><Text wrap="truncate" {...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {})}>{clean(phase.title, 60)}</Text></Box>
-                <Box gap={1}><Text dimColor>{`${c.done}/${c.total} done`}</Text><Button key={`phase-${id}-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [phase.id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
+                <Box flexShrink={1} minWidth={0}><Text wrap="wrap" {...(errored ? { color: 'error' } : stalled ? { color: 'warning' } : {})}>{clean(phase.title, 120)}</Text></Box>
+                <Box gap={1} flexShrink={0}><Text dimColor>{`${c.done}/${c.total} done`}</Text><Button key={`phase-${id}-${index}`} plain onPress={() => { void change($, s => ({ ...s, expandedPhases: { ...s.expandedPhases, [phase.id]: !open } })); }}>{open ? '▾' : '▸'}</Button></Box>
               </Box>}
             {drawGrid ? gridElement(elements, event.surface, `grid-${id}-${index}`, states, 16, width - 2) : agents.length ? null : <Text dimColor>{active ? 'No agents have started yet' : 'No agents ran in this phase'}</Text>}
             {shown > 0 && <Box flexDirection="column" marginTop={1}>
-              {!stacked && <Box gap={1}><Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>{showModel && col('Model', 10)}{col('Context', 7)}{col('Time', 7)}</Box>}
+              {!stacked && <Box gap={1}><Box flexGrow={1} flexShrink={1} minWidth={0}><Text dimColor>Agent</Text></Box>{col('Model', modelWidth)}{col('Context', 7)}{col('Time', 7)}</Box>}
               {agents.slice(0, shown).map((a: any) => {
                 // A finished agent's name is grey and a failed one's red; one retrying after an error says so.
                 // Skipping or retrying an agent is the orchestrator's call (agent_control), not a row's.
                 const failed = a.status === 'failed', finished = cellState(a, now) === 'done' || a.status === 'cancelled';
                 return <Box key={`${id}:${a.name}`} gap={1} flexDirection={stacked ? 'column' : 'row'}>
                   <Box flexGrow={1} flexShrink={1} minWidth={0}>{desktop
-                    ? <elements.Client key={`agent-row-${id}-${a.name}`} module="./row.tsx" flexGrow={1} props={{ id: `agent:${id}:${a.name}`, title: [{ text: clean(a.label && a.label !== a.name ? a.label : a.name, 40), ...(failed ? { color: 'error' as const } : dim || finished ? { dim: true as const } : {}) }, ...(a.error && !failed && !finished ? [{ text: '  Retrying', color: 'warning' as const }] : [])] }} />
-                    : <Box gap={1} minWidth={0}><Box flexShrink={1} minWidth={0}><Text {...(failed ? { color: 'error' } : { dimColor: dim || finished })} wrap="truncate">{clean(a.label && a.label !== a.name ? a.label : a.name, 40)}{a.error && !failed && !finished ? <Text color="warning">{'  Retrying'}</Text> : ''}</Text></Box><Button key={`transcript-${id}-${a.name}`} plain onPress={() => { void openTranscript($, id, a.name); }}>›</Button></Box>}</Box>
-                  {!stacked && showModel && col(modelName(a), 10)}
+                    ? <elements.Client key={`agent-row-${id}-${a.name}`} module="./row.tsx" width="100%" props={{ id: `agent:${id}:${a.name}`, title: [{ text: clean(a.label && a.label !== a.name ? a.label : a.name, 40), ...(failed ? { color: 'error' as const } : dim || finished ? { dim: true as const } : {}) }, ...(a.error && !failed && !finished ? [{ text: '  Retrying', color: 'warning' as const }] : [])] }} />
+                    : <Box gap={1} minWidth={0}><Box flexShrink={1} minWidth={0}><Text {...(failed ? { color: 'error' } : { dimColor: dim || finished })} wrap="wrap">{clean(a.label && a.label !== a.name ? a.label : a.name, 40)}{a.error && !failed && !finished ? <Text color="warning">{'  Retrying'}</Text> : ''}</Text></Box><Button key={`transcript-${id}-${a.name}`} plain onPress={() => { void openTranscript($, id, a.name); }}>›</Button></Box>}</Box>
+                  {!stacked && col(modelName(a), modelWidth)}
                   {!stacked && col(a.context ? tokens(a.context.tokens) : '—', 7, contextFull(a) ? 'warning' : undefined)}
                   {!stacked && (desktop && !finished && !failed && a.startedAt
-                    ? <Box width={7} flexShrink={0}><elements.Client key={`agent-time-${id}-${a.name}`} module="./row.tsx" flexGrow={1} props={{ id: 'clock:', title: [{ text: agentTime(a, now) || '—', dim: true, since: { from: a.startedAt, now } }] }} /></Box>
+                    ? <Box width={7} flexShrink={0}><elements.Client key={`agent-time-${id}-${a.name}`} module="./row.tsx" width="100%" props={{ id: 'clock:', title: [{ text: agentTime(a, now) || '—', dim: true, since: { from: a.startedAt, now } }] }} /></Box>
                     : col(agentTime(a, now) || '—', 7))}
-                  {stacked && <Text dimColor>{`  ${a.context ? `${tokens(a.context.tokens)} context · ` : ''}${agentTime(a, now) || '—'}`}</Text>}
+                  {stacked && <Text dimColor wrap="wrap">{`  ${modelName(a)} · ${a.context ? `${tokens(a.context.tokens)} context · ` : ''}${agentTime(a, now) || '—'}`}</Text>}
                 </Box>;
               })}
               {agents.length > shown && <Text dimColor>{`…and ${agents.length - shown} more`}</Text>}
@@ -621,7 +627,7 @@ export const register: Register = (on, options) => {
         })}
         {more > 0 && <Text dimColor>{`…and ${more} more phase${more === 1 ? '' : 's'}${phases.length < 8 ? ' — collapse a card to make room' : ''}`}</Text>}
         {(run.messages ?? []).length > 0 && <Box flexDirection="column" marginTop={1}><Box gap={2}><Text bold>Messages</Text><Text dimColor>{`${run.unreadForOrchestrator ?? 0} for Claude`}</Text></Box>
-          {(messages ? (run.messages ?? []).slice(-messages) : []).map((m: any) => <Text key={`message-${id}-${m.seq}`} dimColor={dim} wrap="truncate"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
+          {(messages ? (run.messages ?? []).slice(-messages) : []).map((m: any) => <Text key={`message-${id}-${m.seq}`} dimColor={dim} wrap="wrap"><Text dimColor>{`${clean(m.from, 30)} → ${clean(m.to, 30)}  `}</Text>{clean(m.text, 160)}</Text>)}</Box>}
         </Box>
       </Box>;
     };
@@ -634,20 +640,26 @@ export const register: Register = (on, options) => {
           <Button key={`pause-${r.runId}`} dimColor={busy} onPress={() => { void action($, 'workflow_control', { runId: r.runId, action: r.status === 'paused' ? 'resume' : 'pause' }); }}>{r.status === 'paused' ? 'Resume' : 'Pause'}</Button>
           <Button key={`stop-${r.runId}`} dimColor={busy} onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, r.runId), cancelConfirm: r.runId })); }}>Stop</Button>
         </Box>;
+      // A region is as wide as what it draws unless given a width, so the
+      // header's region takes its column's width and its text wraps there.
+      const below = !done && controlsBelow;
       if (desktop) return <Box key={`card-${r.runId}`} flexDirection="column" {...CARD} {...(open ? {} : { hover: { backgroundColor: CARD_HOVER } })}>
-        <Box gap={1} alignItems="flex-start">
-          <elements.Client key={`head-${r.runId}`} module="./row.tsx" flexGrow={1} props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 60), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, ...(r.status === 'running' ? [] : [{ text: `${statusLabel(r.status)}  `, ...(r.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: `${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)}  `, dim: true }, { text: runTime(r, now), dim: true, ...(!done && r.startedAt ? { since: { from: r.startedAt, now } } : {}) }] }} />
+        <Box gap={1} alignItems="flex-start" flexDirection={below ? 'column' : 'row'}>
+          <Box flexGrow={1} flexShrink={1} minWidth={0} {...(below ? { width: '100%' } : {})}><elements.Client key={`head-${r.runId}`} module="./row.tsx" width="100%" props={{ id: `card:${r.runId}`, title: [{ text: clean(r.name, 120), ...(done ? { dim: 'rest' as const } : {}) }], detail: [{ text: 'Workflow  ', dim: true }, ...(r.status === 'running' ? [] : [{ text: `${statusLabel(r.status)}  `, ...(r.status === 'failed' ? { color: 'error' as const } : { dim: true as const }) }]), { text: `${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)}  `, dim: true }, { text: runTime(r, now), dim: true, ...(!done && r.startedAt ? { since: { from: r.startedAt, now } } : {}) }] }} /></Box>
           {control}
         </Box>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
         {open && detail(r)}
       </Box>;
       return <Box key={`card-${r.runId}`} flexDirection="column" paddingX={1} paddingY={desktop ? 1 : 0} {...(desktop ? { backgroundColor: '#8080800d' } : { borderStyle: 'round', borderDimColor: true })}>
-        <Box justifyContent="space-between" gap={1}>
-          <Box flexShrink={1}><Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => toggleRun(s, r.runId)); }}>{`${open ? '▾' : '▸'} ${clean(r.name, 50)}`}</Button></Box>
+        <Box gap={1} flexDirection={below ? 'column' : 'row'}>
+          <Box gap={1} flexGrow={1} flexShrink={1} minWidth={0}>
+            <Button key={`toggle-${r.runId}`} plain dimColor={done} onPress={() => { void change($, s => toggleRun(s, r.runId)); }}>{open ? '▾' : '▸'}</Button>
+            <Box flexShrink={1} minWidth={0}><Text wrap="wrap" dimColor={done}>{clean(r.name, 120)}</Text></Box>
+          </Box>
           {control}
         </Box>
-        <Text dimColor>{'Workflow · '}<Text {...(r.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{statusLabel(r.status)}</Text>{` · ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)} · ${runTime(r, now)}`}</Text>
+        <Text dimColor wrap="wrap">{'Workflow · '}<Text {...(r.status === 'failed' ? { color: 'error' } : { dimColor: true })}>{statusLabel(r.status)}</Text>{` · ${done ? `${c.total} agent${c.total === 1 ? '' : 's'}` : progressText(c)} · ${runTime(r, now)}`}</Text>
         {!done && !open && <Box marginTop={1}>{gridElement(elements, event.surface, `card-grid-${i}`, [...cells(r.agents, now, 63), 'ghost'], 32, width - 2)}</Box>}
         {open && detail(r)}
       </Box>;
@@ -703,7 +715,7 @@ export const register: Register = (on, options) => {
     const elements = $.ui.resolve(event) as any; const { Box, Text, Button } = elements;
     if (run && !terminal(run.status)) return runCard($, elements, event.surface, run, now, runId);
     return <Box gap={1}>
-      <Text dimColor>Ran workflow</Text><Box flexShrink={1} minWidth={0}><Text dimColor wrap="truncate">{clean(run?.name ?? props.input?.name ?? 'workflow', 60)}</Text></Box>
+      <Text dimColor>Ran workflow</Text><Box flexShrink={1} minWidth={0}><Text dimColor wrap="wrap">{clean(run?.name ?? props.input?.name ?? 'workflow', 120)}</Text></Box>
       {run?.status === 'failed' ? <Text color="error">Failed</Text> : run && run.status !== 'completed' ? <Text dimColor>Stopped</Text> : null}
       {run && <Button key={`open-${runId}`} plain onPress={() => { void change($, s => ({ ...s, openRuns: withRun(s.openRuns, runId) })).then(() => openPane($)); }}>›</Button>}
     </Box>;
@@ -738,7 +750,7 @@ export const register: Register = (on, options) => {
     const summary = rest.includes('\n- run ') ? wakeSummary(rest, held.runs) : '';
     return <Box flexDirection="column" gap={1}>
       {finished.map(id => runCard($, elements, event.surface, held.runs[id], now, `wake-${id}`))}
-      {(summary || !finished.length) && <Text dimColor wrap="truncate">{`Stampede · ${summary || wakeSummary(props.text, held.runs)}`}</Text>}
+      {(summary || !finished.length) && <Text dimColor wrap="wrap">{`Stampede · ${summary || wakeSummary(props.text, held.runs)}`}</Text>}
     </Box>;
   });
 };

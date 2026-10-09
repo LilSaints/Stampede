@@ -50,11 +50,12 @@ const Row: ClientModule<RowProps, RowState> = (props, surface) => {
   }
   const hover = surface.state?.hover === true, ticks = surface.state?.base === base(props) ? surface.state.ticks : 0;
   const text = (part: RowPart) => part.since && ticks ? span(part.since.now + ticks * 1000 - Date.parse(part.since.from)) : part.text;
-  const line = (parts: RowPart[]) => <Text wrap="truncate">{parts.map(part => <Text {...(part.dim === true || part.dim === 'rest' && !hover ? { dimColor: true } : {})} {...(part.bold ? { bold: true } : {})} {...(part.color ? { color: part.color } : {})}>{text(part)}</Text>)}</Text>;
+  // Text wraps onto further lines rather than being cut where the region is narrow.
+  const line = (parts: RowPart[]) => <Text wrap="wrap">{parts.map(part => <Text {...(part.dim === true || part.dim === 'rest' && !hover ? { dimColor: true } : {})} {...(part.bold ? { bold: true } : {})} {...(part.color ? { color: part.color } : {})}>{text(part)}</Text>)}</Text>;
   return <Box flexDirection="column" flexGrow={1}>
     <Box justifyContent="space-between" gap={1}>
       <Box flexShrink={1} minWidth={0}>{line(props.title)}</Box>
-      {props.right ? line(props.right) : null}
+      {props.right ? <Box flexShrink={0}>{line(props.right)}</Box> : null}
     </Box>
     {props.detail ? line(props.detail) : null}
   </Box>;

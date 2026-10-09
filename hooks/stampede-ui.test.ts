@@ -432,8 +432,9 @@ test('a desktop that attaches after session start still starts the UI once', asy
   expect(commands).toBe(1);
 });
 // The desktop nests the table in the card, the Phases block and the phase, so
-// it drops columns at a wider pane than the terminal does.
-for (const [surface, narrow, wide] of [['terminal', 51, 52], ['desktop', 57, 58]] as const) test(`the agent table drops Model, then stacks, as the ${surface} pane narrows`, async ($, on) => {
+// it stacks at a wider pane than the terminal does. Nothing is dropped: the
+// stacked row carries the model, context and time on its second line.
+for (const [surface, narrow, wide] of [['terminal', 45, 46], ['desktop', 51, 52]] as const) test(`the agent table keeps every column, then stacks, as the ${surface} pane narrows`, async ($, on) => {
   mock.clock(on, { now: 100000 });
   const fixture: any = { ...run(), phases: [{ title: 'Explore' }], log: ['11 explorers inventory the desktop'], agents: [{ name: 'shell', backend: 'codex', model: 'gpt-fixture', status: 'running', phase: 'Explore', tokens: 1, context: { tokens: 20400 } }, { name: 'tools', backend: 'codex', status: 'queued', phase: 'Explore', tokens: 0 }] };
   const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: fixture }, ownedRunIds: ['owned'], openRuns: ['owned'] };
@@ -442,15 +443,31 @@ for (const [surface, narrow, wide] of [['terminal', 51, 52], ['desktop', 57, 58]
     const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
     const text = JSON.stringify(await ui.drawn()); await ui.unmount(); return text;
   };
-  const full = await drawn(wide);
-  for (const text of ['"Model"', '"Context"', 'gpt-fixture', '1 running · 0/2 done']) expect(full.includes(text)).toBe(true);
-  expect(full.includes('explorers')).toBe(false);
-  const compact = await drawn(narrow);
-  expect(compact.includes('"Model"')).toBe(false);
-  expect(compact.includes('"Context"')).toBe(true);
-  const stacked = await drawn(narrow - 16);
-  expect(stacked.includes('"Context"')).toBe(false);
-  expect(stacked.includes('20.4k context')).toBe(true);
+  for (const width of [wide, 100]) {
+    const full = await drawn(width);
+    for (const text of ['"Model"', '"Context"', 'gpt-fixture', '1 running · 0/2 done']) expect(full.includes(text)).toBe(true);
+    expect(full.includes('explorers')).toBe(false);
+  }
+  for (const width of [narrow, 38]) {
+    const stacked = await drawn(width);
+    expect(stacked.includes('"Model"')).toBe(false);
+    expect(stacked.includes('"Context"')).toBe(false);
+    expect(stacked.includes('gpt-fixture · 20.4k context')).toBe(true);
+  }
+});
+for (const surface of ['terminal', 'desktop'] as const) test(`a long run name is never cut and wraps instead on ${surface}`, async ($, on) => {
+  mock.clock(on, { now: 100000 });
+  const name = 'Run 3: B3 oversight (Jobs, Activity, Agents, attention) + B6 Settings';
+  const state = { ...initialState(), hub: { ok: true, url: '' }, runs: { owned: { ...run(), name } }, ownedRunIds: ['owned'], openRuns: ['owned'] };
+  on('state.get', () => ({ value: { value: state, version: 1 } }));
+  for (const bodyColumns of [38, 50, 100]) {
+    const ui = await $.ui.mount({ plugin: 'stampede', surface, component: 'Pane', requestId: 'stampede', props: { bodyColumns, title: 'Stampede', isFocused: true, placement: 'dock' } as any });
+    const drawn = JSON.stringify(await ui.drawn());
+    expect(drawn.includes(name)).toBe(true);
+    expect(drawn.includes('"truncate"')).toBe(false);
+    expect(await ui.find({ key: 'pause-owned' })).toBeDefined();
+    await ui.unmount();
+  }
 });
 for (const surface of ['terminal', 'desktop'] as const) test(`agent names carry no glyph, say Retrying after an error, and turn red when failed on ${surface}`, async ($, on) => {
   mock.clock(on, { now: 100000 });
