@@ -61,6 +61,8 @@ const TOOL_ITEMS = ['command_execution', 'file_change', 'mcp_tool_call', 'web_se
 const ARGS_MAX_BYTES = 4 * 1024 * 1024;
 /** A scratch folder longer than this, on Windows, gets a note: it leaves under 160 of the 260-character path limit. */
 const SCRATCH_PATH_WARN = 100;
+/** A duration as a refusal states it: `14400000 ms (4 h)`. */
+const span = (ms: number) => `${ms} ms (${ms >= 3600000 ? `${+(ms / 3600000).toFixed(1)} h` : ms >= 60000 ? `${+(ms / 60000).toFixed(1)} min` : `${+(ms / 1000).toFixed(1)} s`})`;
 export const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export interface RunInput { script?: string; scriptPath?: string; name?: string; args?: unknown; argsPath?: string; cwd?: string; budgetTokens?: number; budgetUsd?: number; defaultBackend?: 'claude' | 'codex'; orchestratorSessionId?: string; notifyAgents?: boolean; title?: string; continueInterrupted?: boolean; limits?: Partial<Config['limits']> }
 export interface UiEvent { hubSeq: number; runId: string; type: string; at: string; data: any }
@@ -105,7 +107,7 @@ export class RunManager extends EventEmitter {
     return this.eventMutex.run(async () => {
       if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
-      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.done', 'checkpoint.waiting'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
+      if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.refused', 'agent.done', 'checkpoint.waiting'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
       await this.store.append(path.join(this.store.runDir(run.id), 'events.jsonl'), event);
       await this.store.write(path.join(this.store.runDir(run.id), 'run.json'), run);
@@ -267,7 +269,12 @@ export class RunExecution {
   async call(method: string, params: any, nesting = 0, group?: string): Promise<any> {
     if (this.abort.signal.aborted || this.draining || runTerminal(this.run.status)) throw new Error('run cancelled');
     const phase = (title?: string) => group ? group + (title ? ' / ' + title : '') : title;
-    if (method === 'agent') { const opts = params.opts ?? {}; const c = this.prepare(params.prompt, { ...opts, phase: phase(opts.phase) }); c.task = this.dispatch(c); void c.task.catch(e => this.fail(e)); return c.done; }
+    if (method === 'agent') {
+      const opts = { ...params.opts, phase: phase(params.opts?.phase) };
+      let c: AgentContext;
+      try { c = this.prepare(params.prompt, opts); } catch (error) { await this.refused(opts, error as Error).catch(() => {}); throw error; }
+      c.task = this.dispatch(c); void c.task.catch(e => this.fail(e)); return c.done;
+    }
     if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
     // An agent's worktree as the script needs it to continue that work: branch, commits and path.
     if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name); return a?.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, baseCommit: a.workspace.baseCommit ?? null, commit: a.workspace.commit ?? null, path: a.workspace.path, kept: a.workspace.kept ?? null } : null; }
@@ -348,6 +355,26 @@ export class RunExecution {
     await this.event('checkpoint.answered', { name, occ: waiter.record.occ });
     return { name, occ: waiter.record.occ, status: 'answered' };
   }
+  /** An agent() option over its limit, and where that limit is set: the hub's config.json, unless the project or the run lowered it. */
+  private overLimit(option: string, value: number, key: 'turnTimeoutMs' | 'maxResumesPerAgent', unit: (n: number) => string) {
+    const limit = this.config.limits[key], hub = this.manager.config.limits[key];
+    const where = limit < hub ? `, which this run's limits or the project's .stampede/config.json set below the hub's ${unit(hub)}: ask for less` : `: ask for less, or raise limits.${key} in ${path.join(this.manager.store.home, 'config.json')} and restart the hub`;
+    return new Error(`${option} ${unit(value)} exceeds limits.${key}, ${unit(limit)}${where}`);
+  }
+  /** Messages of the agent() calls refused so far: the first of each kind raises agent.refused. */
+  private readonly refusals = new Set<string>();
+  /**
+   * An agent() call refused before launch wakes the orchestrator: inside
+   * parallel() or pipeline() the script sees only null. Budget refusals have
+   * budget.exhausted, and a repeated refusal raises nothing more.
+   */
+  private async refused(opts: AgentOpts, error: Error) {
+    const message = error.message.slice(0, 300);
+    if (!this.budgetAvailable() || this.refusals.has(message)) return;
+    this.refusals.add(message);
+    const call = Object.fromEntries((['name', 'label', 'phase'] as const).flatMap(key => typeof opts[key] === 'string' ? [[key, opts[key].slice(0, 80)]] : []));
+    await this.event('agent.refused', { ...call, error: { message } });
+  }
   private validate(prompt: string, opts: AgentOpts, team = false) {
     if (typeof prompt !== 'string') throw new Error('agent prompt must be a string');
     if (!this.budgetAvailable()) throw new Error('budget exhausted');
@@ -361,8 +388,10 @@ export class RunExecution {
     if (opts.access === 'full' && !this.config.allowFullAccess) throw new Error("access 'full' disabled by config");
     if (backend === 'codex' && (opts.access === 'edit' || opts.isolation === 'worktree' && opts.access !== 'read-only') && this.manager.backends.codex.capabilities.workspaceWriteReady === false) throw new Error('Codex workspace-write sandbox is not ready; run stampede doctor');
     if (opts.isolation && !['shared', 'worktree'].includes(opts.isolation)) throw new Error('invalid isolation');
-    if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0 || opts.timeoutMs > this.config.limits.turnTimeoutMs)) throw new Error('timeoutMs must be positive and no greater than the configured limit');
-    if (opts.maxResumes !== undefined && (!Number.isInteger(opts.maxResumes) || opts.maxResumes < 0 || opts.maxResumes > this.config.limits.maxResumesPerAgent)) throw new Error('maxResumes must be an integer within the configured limit');
+    if (opts.timeoutMs !== undefined && (!Number.isFinite(opts.timeoutMs) || opts.timeoutMs <= 0)) throw new Error('timeoutMs must be a positive number of milliseconds');
+    if (opts.timeoutMs !== undefined && opts.timeoutMs > this.config.limits.turnTimeoutMs) throw this.overLimit('timeoutMs', opts.timeoutMs, 'turnTimeoutMs', span);
+    if (opts.maxResumes !== undefined && (!Number.isInteger(opts.maxResumes) || opts.maxResumes < 0)) throw new Error('maxResumes must be a non-negative integer');
+    if (opts.maxResumes !== undefined && opts.maxResumes > this.config.limits.maxResumesPerAgent) throw this.overLimit('maxResumes', opts.maxResumes, 'maxResumesPerAgent', String);
     if (opts.effort !== undefined && !['low', 'medium', 'high', 'xhigh', 'max'].includes(opts.effort)) throw new Error('invalid effort');
     if (opts.cache !== undefined && !['auto', 'never', 'commit'].includes(opts.cache)) throw new Error('invalid cache policy');
     if (opts.cache === 'commit' && !(opts.isolation === 'worktree' || opts.isolation === undefined && (opts.access === 'edit' || opts.access === 'full'))) throw new Error("cache 'commit' needs a worktree: isolation 'worktree', or edit or full access");

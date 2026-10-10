@@ -38,16 +38,24 @@ delete globalThis.__rpc; delete globalThis.__args; delete globalThis.__total; de
 let currentPhase;
 const phase = title => { currentPhase = title; return rpc('phase', { title }); };
 const log = message => rpc('log', { message: String(message) });
-const agent = (prompt, opts = {}) => rpc('agent', { prompt, opts: { phase: currentPhase, ...opts } });
+// A rejected agent() call was refused before launch; the error names the call for the run log.
+const agent = (prompt, opts = {}) => rpc('agent', { prompt, opts: { phase: currentPhase, ...opts } }).catch(error => { error.refusedAgent = String(opts?.name ?? opts?.label ?? ''); throw error; });
+// The script sees only null, so the reason goes to the run log, which workflow_status shows.
+async function nulled(where, error) {
+  const message = String(error?.message ?? error).slice(0, 500);
+  const call = typeof error?.refusedAgent === 'string' ? 'agent()' + (error.refusedAgent ? ' ' + JSON.stringify(error.refusedAgent.slice(0, 40)) : '') + ' was refused: ' : '';
+  if (message !== 'run cancelled') await log(where + ' is null: ' + call + message).catch(() => {});
+  return null;
+}
 async function parallel(thunks) {
   if (!Array.isArray(thunks) || thunks.length > 4096) throw new Error('parallel supports at most 4096 thunks');
-  return Promise.all(thunks.map(async thunk => { try { return await thunk(); } catch { return null; } }));
+  return Promise.all(thunks.map(async (thunk, index) => { try { return await thunk(); } catch (error) { return nulled('parallel() slot ' + index, error); } }));
 }
 async function pipeline(items, ...stages) {
   if (!Array.isArray(items) || items.length > 4096) throw new Error('pipeline supports at most 4096 items');
   return Promise.all(items.map(async (item, index) => {
     let previous = item;
-    for (const stage of stages) { try { previous = await stage(previous, item, index); } catch { return null; } if (previous === null) return null; }
+    for (const [n, stage] of stages.entries()) { try { previous = await stage(previous, item, index); } catch (error) { return nulled('pipeline() item ' + index + ' (stage ' + (n + 1) + ' of ' + stages.length + ' threw)', error); } if (previous === null) return null; }
     return previous;
   }));
 }

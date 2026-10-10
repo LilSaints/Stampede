@@ -26,11 +26,12 @@ export function reduce(state: StampedeUiState, snapshot: any, events: any[], ses
     else if (kind === 'checkpoint.waiting') text = `run ${run.runId} "${run.name}": checkpoint "${clean(event.data.name, 80)}" (#${event.data.occ}) waits for your answer: ${checkpointLine(event.data.data)}. workflow_status shows its data; answer it with workflow_answer.`;
     else if (kind === 'message.accepted' && (event.data.to === 'orchestrator' || event.data.to === '*') && !['orchestrator', 'system'].includes(event.data.from)) { kind = 'message.orchestrator'; text = `run ${run.runId}: message from ${event.data.from} → orchestrator (#${event.data.seq}): ${JSON.stringify(clean(event.data.text, 280))}. Read workflow_messages.`; }
     else if (kind === 'agent.failed') text = `run ${run.runId} "${run.name}": agent ${clean(event.data.name, 40)} failed after ${event.data.attempts} attempt${event.data.attempts === 1 ? '' : 's'} (${clean(event.data.error?.kind ?? 'unknown', 30)}): ${JSON.stringify(clean(event.data.error?.message ?? '', 200))}. Its agent() returned null and the run goes on without it; workflow_result with agent reads any finished agent.`;
+    else if (kind === 'agent.refused') text = `run ${run.runId} "${run.name}": ${refusedName(event) ? `agent ${refusedName(event)}` : 'an agent() call'} was refused before launch, so it threw (null in parallel() or pipeline()): ${JSON.stringify(clean(event.data.error?.message ?? '', 220))}`;
     else if (kind === 'agent.done') text = `run ${run.runId} "${run.name}": agent ${clean(event.data.name, 40)} is done. workflow_result with agent reads its result.`;
     else if (['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'orchestrator.action'].includes(kind)) text = `run ${run.runId}: ${kind} ${clean(JSON.stringify(event.data), 230)}`;
     if (text && !next.pendingWake.some(w => w.hubSeq === event.hubSeq)) {
       next.pendingWake.push({ runId: run.runId, hubSeq: event.hubSeq, kind, text: clean(text, kind === 'run.terminal' ? 900 : 400) }); next.pendingSince ||= now; next.lastTrigger = now;
-      if (['run.terminal', 'message.orchestrator', 'backend.unavailable', 'agent.failed', 'checkpoint.waiting'].includes(kind)) next.toastPending.push({ runId: run.runId, hubSeq: event.hubSeq, text: clean(notice(kind, run, event), 120) });
+      if (['run.terminal', 'message.orchestrator', 'backend.unavailable', 'agent.failed', 'agent.refused', 'checkpoint.waiting'].includes(kind)) next.toastPending.push({ runId: run.runId, hubSeq: event.hubSeq, text: clean(notice(kind, run, event), 120) });
     }
   }
   // A run's own end reports its agents' results, so their done lines go with it.
@@ -61,6 +62,8 @@ export function cancelledText(cancelled: any) {
   const shown = cancelled.slice(0, 4).map((a: any) => `${clean(a.name, 40)}${a.worktree ? ` (branch ${clean(a.branch ?? '?', 80)}, commit ${clean(String(a.commit ?? '?').slice(0, 12), 12)}, ${a.kept ? `worktree ${clean(a.worktree, 160)}` : 'worktree removed: nothing past its base'})` : ''}`);
   return ` Cancelled: ${shown.join('; ')}${cancelled.length > 4 ? `; +${cancelled.length - 4} more` : ''}.`;
 }
+/** The name (or label) of a refused agent() call, which it may lack, as one word. */
+const refusedName = (event: any) => { const who = event.data.name ?? event.data.label; return who ? clean(who, 40).replace(/\s/g, '-') : undefined; };
 /** What a person reads for an update: the toast, and the wake's row in the transcript. */
 export function notice(kind: string, run: any, event: any) {
   const name = clean(run.name, 60);
@@ -68,6 +71,7 @@ export function notice(kind: string, run: any, event: any) {
   if (kind === 'message.orchestrator') return `${name}: message from ${clean(event.data.from, 40)}`;
   if (kind === 'backend.unavailable') return `${name}: ${clean(event.data.backend ?? 'backend', 20)} unavailable`;
   if (kind === 'agent.failed') return `${name}: ${clean(event.data.name, 40)} failed`;
+  if (kind === 'agent.refused') return `${name}: ${refusedName(event) ?? 'agent()'} refused`;
   if (kind === 'checkpoint.waiting') return `${name}: checkpoint ${clean(event.data.name, 40)} waits for Claude`;
   return `${name}: ${kind.replace(/[._]/g, ' ')}`;
 }
@@ -82,6 +86,8 @@ export function wakeSummary(text: string, runs: Record<string, any>) {
     if (status) return `${name} ${statusLabel(status).toLowerCase()}`;
     const failed = /^agent (\S+) failed/.exec(rest!)?.[1];
     if (failed) return `${name}: ${failed} failed`;
+    const refused = /^(?:agent (\S+)|an agent\(\) call) was refused/.exec(rest!);
+    if (refused) return `${name}: ${refused[1] ?? 'agent()'} refused`;
     const finished = /^agent (\S+) is done/.exec(rest!)?.[1];
     if (finished) return `${name}: ${finished} done`;
     const checkpoint = /^checkpoint "([^"]*)"/.exec(rest!)?.[1];
