@@ -18,6 +18,10 @@ export interface AgentLaunch {
   inheritMcpServers?: boolean; settingSources?: string; editShellAllow?: string[]; maxUsd?: number; persistNonComms?: boolean;
   /** Claude tools removed beyond the recursion tools; `skills: false` also removes skills and custom commands. */
   denyTools?: string[]; skills?: boolean;
+  /** The call's built-in Claude tools (`--tools`); without it, all of them. */
+  tools?: string[];
+  /** The call's other MCP servers, resolved and in the backend's shape: Claude's are in `mcpPath` beside Stampede's, Codex's go on its argv. */
+  mcpServers?: Record<string, Record<string, unknown>>;
   disableHooks?: boolean; extraEnv?: Record<string, string>; mcpEnv?: Record<string, string>;
   /** Codex's approvals_reviewer ("user", "auto_review"); Codex's own default without one. */
   approvalsReviewer?: string;

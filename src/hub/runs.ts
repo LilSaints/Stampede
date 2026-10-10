@@ -13,6 +13,7 @@ import { contract } from '../contract/prompts.js';
 import { agentTools } from '../mcp/tools.js';
 import { externalTools } from '../backends/tool-usage.js';
 import { findAgentFile, withTools } from '../backends/claudeAgents.js';
+import { checkPlugins, mcpServerEntries, resolveMcpServers, resolvePlugins } from '../backends/userConfig.js';
 import { type CleanupRoot, cleanup, scratchFolders, within } from './cleanup.js';
 import { claudeContext, claudeReplies, claudeSessionExists, claudeTranscriptSize, claudeWindow, codexContext, codexThreadExists } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
@@ -42,6 +43,8 @@ interface AgentContext {
   steering?: boolean; steers?: number;
   /** Where the agent may delete (its worktree, its scratch folders), and the scratch folders removed when it is done. */
   cleanupRoots?: CleanupRoot[]; scratch?: string[];
+  /** Whether a Claude worker's start (its init event) was checked against the tools and servers its call asked for. */
+  initChecked?: boolean;
 }
 interface Team { id: string; names: string[]; createdAt: number; lastOrchestratorMessage: number; releaseIdleAfterMs?: number; key?: string; occ?: number; replay?: TeamRecord; admissionAbort?: AbortController; admission?: Promise<void> }
 /** What an agent cut off by a stopping hub records, so a resumed run can continue it. */
@@ -381,6 +384,20 @@ export class RunExecution {
       if (reserved) throw new Error(`env cannot set ${reserved[0]}: Stampede sets it`);
     }
     if (opts.locks !== undefined && (!Array.isArray(opts.locks) || opts.locks.length > 10 || opts.locks.some(name => typeof name !== 'string' || !LOCK_NAME.test(name)))) throw new Error('locks must be a list of at most 10 names of letters, digits, dots, hyphens or underscores');
+    if (opts.tools !== undefined) {
+      if (backend !== 'claude') throw new Error('tools is for Claude workers; a Codex worker\'s tools follow its access level');
+      if (!Array.isArray(opts.tools) || opts.tools.length > 64 || opts.tools.some(tool => typeof tool !== 'string' || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(tool))) throw new Error('tools must be a list of at most 64 built-in Claude tool names, such as ["Read", "Grep"]');
+      // A tool list narrows what the access level gives; it never adds what the hub removes.
+      const access = opts.access ?? (opts.isolation === 'worktree' ? 'edit' : 'read-only');
+      const refused = (tool: string) => ['Agent', 'Task', 'TeamCreate', 'TeamDelete', 'Workflow'].includes(tool) ? 'workers never start agents, teams or workflows' : this.config.claude.denyTools.includes(tool) ? 'claude.denyTools removes it' : access === 'read-only' && ['Edit', 'Write', 'NotebookEdit', 'Bash', 'PowerShell'].includes(tool) ? 'read-only access has no edit or shell tools' : access === 'edit' && !this.config.claude.editShellAllow.length && ['Bash', 'PowerShell'].includes(tool) ? 'edit access has no shell while claude.editShellAllow is empty' : undefined;
+      const bad = opts.tools.find(refused);
+      if (bad) throw new Error(`tools cannot include ${bad}: ${refused(bad)}`);
+    }
+    if (opts.mcpServers !== undefined) {
+      mcpServerEntries(opts.mcpServers);
+      if (backend === 'codex' && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('mcpServers need MCP servers by flags, which this Codex CLI is not qualified for; run stampede doctor');
+    }
+    if (opts.plugins !== undefined) { if (backend !== 'claude') throw new Error('plugins is for Claude workers'); checkPlugins(opts.plugins); }
     if (opts.name !== undefined && (typeof opts.name !== 'string' || !/^[a-z0-9-]{1,40}$/.test(opts.name) || ['orchestrator', 'system'].includes(opts.name) || this.contexts.has(opts.name))) throw new Error('agent name must be unique and match [a-z0-9-]{1,40}');
     if (backend === 'codex' && opts.agentType && !this.config.codex.agentTypes[opts.agentType]) throw new Error(`unknown agentType for codex: ${opts.agentType}`);
     const model = opts.model ?? (backend === 'codex' && opts.agentType ? this.config.codex.agentTypes[opts.agentType].model : undefined) ?? this.config.codex.defaultModel;
@@ -439,6 +456,13 @@ export class RunExecution {
       const open = a.turns.at(-1);
       if (!final && found.spent !== undefined && open && !open.endedAt) a.liveTokens = Math.max(0, found.spent - a.turns.filter(t => t.endedAt && t.outcome?.sessionId === a.sessionId).reduce((sum, t) => sum + t.outcome!.usage.outputTokens, 0));
     }).catch(() => {});
+  }
+  /** What a Claude worker's start reports it lacks of what its call asked for: Claude ignores a tool name it does not know, and starts without a server that failed. */
+  private async startNotes(c: AgentContext, init: any) {
+    const missing = Array.isArray(init.tools) ? (c.opts.tools ?? []).filter(tool => !init.tools.includes(tool)) : [];
+    if (missing.length) await this.note(`${c.agent.name}: Claude Code has no tool named ${missing.join(', ')}, so the worker runs without it`);
+    const failed = Array.isArray(init.mcp_servers) ? init.mcp_servers.filter((server: any) => c.launch?.mcpServers?.[server?.name] && !['connected', 'pending'].includes(server.status)) : [];
+    for (const server of failed) await this.note(`${c.agent.name}: MCP server ${server.name} is ${server.status}, so the worker runs without its tools`);
   }
   private syncPeer(a: Agent) { this.peers.set(a.name, { name: a.name, backend: a.backend, comms: a.comms.enabled, canMessage: a.comms.canMessage, status: a.status, markedDone: a.markedDone, turn: a.turns.length }); }
   /** A line of the run's log, which workflow_status shows the orchestrator, from the hub rather than the script. */
@@ -554,7 +578,14 @@ export class RunExecution {
     // clean; lock and unlock where its call names locks.
     const optional = (name: string) => name === 'cleanup' ? cleanupTool : name === 'lock' || name === 'unlock' ? lockTools : true;
     const mcpTools = a.comms.enabled ? agentTools.map(t => t.name).filter(optional) : [...(cleanupTool ? ['cleanup'] : []), ...(lockTools ? ['lock', 'unlock'] : [])];
-    await this.manager.store.write(mcpPath, { mcpServers: mcpTools.length ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token, STAMPEDE_AGENT_TOOLS: mcpTools.join(',') } } } : {} });
+    // The call's own MCP servers and plugins, from the user's configuration for the checkout the call names.
+    const userCwd = path.resolve(this.run.cwd, c.opts.cwd ?? '.');
+    let servers: Record<string, Record<string, unknown>> = {}, plugins: Record<string, boolean> | undefined;
+    try {
+      if (c.opts.mcpServers?.length) servers = await resolveMcpServers(c.opts.mcpServers, a.backend, userCwd, { ...process.env, ...c.opts.env });
+      if (c.opts.plugins) plugins = await resolvePlugins(c.opts.plugins, userCwd);
+    } catch (error) { throw Object.assign(error as Error, { kind: 'config' }); }
+    await this.manager.store.write(mcpPath, { mcpServers: { ...(mcpTools.length ? { stampede: { type: 'stdio', command: process.execPath, args: [this.manager.cliEntry, 'mcp', '--role', 'agent'], env: { STAMPEDE_HUB_URL: this.manager.hubUrl, STAMPEDE_AGENT_TOKEN: c.token, STAMPEDE_AGENT_TOOLS: mcpTools.join(',') } } } : {}), ...(a.backend === 'claude' ? servers : {}) } });
     const hook = (event: string) => ({ type: 'command', command: `"${process.execPath}" "${path.join(path.dirname(this.manager.cliEntry), 'hook.js')}" ${event} --backend claude`, timeout: 5 });
     // Other agents' worktrees are closed to a Claude agent, but for reading
     // the ones its call names in readWorktrees (a reviewer of an integrator's
@@ -562,12 +593,12 @@ export class RunExecution {
     const readable = new Set(c.opts.readWorktrees ?? []);
     const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => ({ name: p.name, root: p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name) })));
     const denied: [string, string[]][] = [[this.manager.store.home, ['Read', 'Edit', 'Write']], ...otherWorktrees.map(({ name, root }): [string, string[]] => [root, readable.has(name) ? ['Edit', 'Write'] : ['Read', 'Edit', 'Write']])];
-    await this.manager.store.write(settingsPath, { enabledPlugins: { 'stampede@stampede': false }, permissions: { deny: denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } });
+    await this.manager.store.write(settingsPath, { enabledPlugins: plugins ?? { 'stampede@stampede': false }, permissions: { deny: denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)) }, hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } });
     // Every Claude worker reads its inbox after each tool call and before it stops, so the orchestrator can steer any of them.
-    // An agent type listing its tools leaves out the structured-output tool and Stampede's: a copy of it adds them.
+    // An agent type listing its tools leaves out the structured-output tool, Stampede's and the call's servers': a copy of it adds them.
     let agentType = c.opts.agentType, agentsPath: string | undefined;
     if (a.backend === 'claude' && c.opts.agentType) {
-      const needed = [...(c.opts.schema ? ['StructuredOutput'] : []), ...mcpTools.map(tool => `mcp__stampede__${tool}`)];
+      const needed = [...(c.opts.schema ? ['StructuredOutput'] : []), ...mcpTools.map(tool => `mcp__stampede__${tool}`), ...Object.keys(servers).map(name => `mcp__${name}`)];
       const found = needed.length ? await findAgentFile(c.opts.agentType, a.workspace.path) : undefined;
       const definition = found && withTools(found, c.opts.agentType, needed);
       if (definition) { agentType = `stampede-${c.opts.agentType}`; agentsPath = path.join(dir, 'agents.json'); await this.manager.store.write(agentsPath, { [agentType]: definition }); }
@@ -575,7 +606,7 @@ export class RunExecution {
     const codexType = c.opts.agentType && a.backend === 'codex' ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const schemaPath = c.opts.schema ? path.join(dir, 'schema.json') : undefined;
     if (schemaPath) await this.manager.store.write(schemaPath, a.backend === 'codex' ? codexSchema(c.opts.schema!).schema : c.opts.schema);
-    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, writableDirs, ...(c.opts.env ? { extraEnv: { ...c.opts.env } } : {}), model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch, locks: c.opts.locks }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
+    c.launch = { backend: a.backend, binary: backend.binary!, entry: backend.entry, developerInstructionsFlag: backend.capabilities.developerInstructionsFlag !== false, cwd: a.workspace.path, access: a.access, writableDirs, ...(c.opts.env ? { extraEnv: { ...c.opts.env } } : {}), model: c.opts.model ?? codexType?.model ?? (a.backend === 'codex' ? this.config.codex.defaultModel : undefined), effort: c.opts.effort ?? codexType?.effort ?? (a.backend === 'codex' ? this.config.codex.defaultEffort : undefined), agentType, agentsPath, schema: c.opts.schema, schemaPath, mcpPath, settingsPath, contract: contract({ ...a, cwd: a.workspace.path, schema: c.opts.schema, comms: a.comms.enabled, peers: [...this.contexts.keys()], canMessage: a.comms.canMessage, team: Boolean(a.teamId), cleanup: cleanupTool, scratch: c.scratch, locks: c.opts.locks }) + '\n' + (codexType?.developerInstructions ?? '') + '\n' + (c.opts.appendSystemPrompt ?? ''), comms: a.comms.enabled, ...(mcpTools.length ? { mcpTools } : {}), ...(c.opts.tools ? { tools: c.opts.tools } : {}), ...(Object.keys(servers).length ? { mcpServers: servers } : {}), hubUrl: this.manager.hubUrl, token: c.token, cliEntry: this.manager.cliEntry, windowsSandbox: this.config.codex.windowsSandbox, timeoutMs: c.opts.timeoutMs ?? this.config.limits.turnTimeoutMs, stdoutPath: '', stderrPath: '', inheritMcpServers: this.config.claude.inheritMcpServers, persistNonComms: this.config.claude.persistNonComms, settingSources: this.config.claude.isolateUserHooks ? 'project,local' : this.config.claude.settingSources, editShellAllow: this.config.claude.editShellAllow, denyTools: this.config.claude.denyTools, skills: this.config.claude.skills, maxUsd: this.config.limits.claudeTurnMaxUsd ?? undefined, disableHooks: a.backend === 'codex' && this.config.codex.disableUserHooks, approvalsReviewer: a.backend === 'codex' ? this.config.codex.approvalsReviewer ?? undefined : undefined };
     // The model and effort asked for show until the backend reports the ones it resolved.
     a.model ??= c.launch.model;
     a.effort ??= c.launch.effort;
@@ -617,6 +648,7 @@ export class RunExecution {
         if (a.backend === 'claude') {
           if (event.type === 'system' && typeof event.model === 'string') a.model = event.model;
           if (event.type === 'system' && event.subtype === 'init' && typeof event.apiKeySource === 'string') a.billing = event.apiKeySource === 'none' ? 'subscription' : 'api';
+          if (event.type === 'system' && event.subtype === 'init' && !c.initChecked) { c.initChecked = true; void this.startNotes(c, event).catch(() => {}); }
           const context = claudeContext(event), window = claudeWindow(event);
           if (context || window) a.context = { tokens: context?.tokens ?? a.context?.tokens ?? 0, ...((window ?? a.context?.window) ? { window: window ?? a.context?.window } : {}) };
           // The stream's own usage counts output as each request starts; the transcript has its final count.

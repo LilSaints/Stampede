@@ -1,6 +1,7 @@
 import type { Usage, TurnOutcome } from '../backends/adapter.js';
 import type { Workspace } from './workspaces.js';
 import type { Meta } from '../runtime/parse.js';
+import type { McpServerEntry } from '../backends/userConfig.js';
 export type AgentStatus = 'queued' | 'starting' | 'running' | 'waiting' | 'idle' | 'resuming' | 'done' | 'failed' | 'cancelled' | 'skipped';
 export type RunStatus = 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 export const agentTerminal = (status: string) => ['done', 'failed', 'cancelled', 'skipped'].includes(status);
@@ -21,6 +22,12 @@ export interface AgentOpts {
   env?: Record<string, string>;
   /** Hub-wide locks this agent may take with the lock tool, for a resource only one worker may use at a time (a real desktop window). */
   locks?: string[];
+  /** Claude only: the built-in tools the worker has (Claude's --tools), within what its access level allows; [] for none. MCP tools are not in it. */
+  tools?: string[];
+  /** MCP servers the worker gets beside Stampede's: names from the backend's own config, or `{ name: config }` in Claude's shape. */
+  mcpServers?: McpServerEntry[];
+  /** Claude only: plugins turned on or off for this worker by id (name@marketplace), bare name, or `*` for every one the user has. */
+  plugins?: Record<string, boolean>;
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';

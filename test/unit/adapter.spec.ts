@@ -17,6 +17,21 @@ test('a worker without comms gets only the Stampede tools the hub gives it, and 
   assert.ok(codex.some(arg => arg.startsWith('mcp_servers.stampede.env=') && arg.includes('"STAMPEDE_AGENT_TOOLS"="cleanup"')));
   assert.ok(!codexArgv(launch('.'), { platform: 'linux' }).some(arg => arg.startsWith('mcp_servers.stampede')));
 });
+test('a call\'s tool list and MCP servers reach the argv: Claude allows the servers\' tools, Codex gets them field by field', () => {
+  const servers = { unreal: { command: 'unreal-bridge', args: ['--port', '8080'], env: { 'odd key': 'v' } }, web: { url: 'https://example.invalid/mcp', http_headers: { Authorization: 'Bearer t' } } };
+  const claude = claudeArgv({ ...launch('.'), backend: 'claude', tools: ['Grep', 'Read'], mcpServers: servers });
+  assert.equal(claude[claude.indexOf('--tools') + 1], 'Grep,Read');
+  assert.ok(claude.indexOf('--tools') < claude.indexOf('--allowedTools'));
+  assert.equal(claude[claude.indexOf('--permission-mode') + 1], 'default');
+  for (const tool of ['mcp__unreal__*', 'mcp__web__*']) assert.ok(claude.slice(claude.indexOf('--allowedTools'), claude.indexOf('--disallowedTools')).includes(tool));
+  const none = claudeArgv({ ...launch('.'), backend: 'claude', tools: [] });
+  assert.equal(none[none.indexOf('--tools') + 1], '');
+  assert.equal(none[none.indexOf('--permission-mode') + 1], 'plan');
+  const a = { ...launch('.'), mcpServers: servers };
+  const codex = codexArgv(a, { platform: 'linux' });
+  for (const arg of ['mcp_servers.unreal.command="unreal-bridge"', 'mcp_servers.unreal.args=["--port","8080"]', 'mcp_servers.unreal.env={"odd key"="v"}', 'mcp_servers.web.url="https://example.invalid/mcp"', 'mcp_servers.web.http_headers={Authorization="Bearer t"}', 'mcp_servers.unreal.default_tools_approval_mode="approve"', 'mcp_servers.web.default_tools_approval_mode="approve"']) assert.ok(codex.includes(arg), arg);
+  assert.deepEqual(codexArgv(a, { platform: 'linux', resumeThreadId: 'thread' }), [...codex.slice(0, -1), 'resume', 'thread', '-']);
+});
 test('an edit worker may also write its scratch folders outside its workspace', () => {
   const dirs = ['C:\\scratch\\a', 'D:\\b'];
   const claude = claudeArgv({ ...launch('.'), backend: 'claude', access: 'edit', writableDirs: dirs });

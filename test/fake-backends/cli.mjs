@@ -68,6 +68,15 @@ if (prompt === 'fixture:steer' && codex) {
 if (prompt === 'fixture:slow') { await new Promise(resolve => setTimeout(resolve, 1500)); scenarioOutput = 'slow done'; }
 // The worker's own argv, for a test to inspect how the hub launched it.
 if (prompt === 'fixture:argv') scenarioOutput = JSON.stringify({ argv });
+// How the hub launched a Claude worker (argv, MCP config, settings), after the init event Claude starts with:
+// the tools `--tools` keeps of the three this fake has, and each server connected but one whose command is missing.
+if (prompt === 'fixture:launch' && !codex) {
+  const file = flag => readFile(argv[argv.indexOf(flag) + 1], 'utf8').then(JSON.parse);
+  const mcp = await file('--mcp-config'), settings = await file('--settings');
+  const builtIn = ['Read', 'Grep', 'Glob'], tools = argv.includes('--tools') ? argv[argv.indexOf('--tools') + 1].split(',').filter(tool => builtIn.includes(tool)) : builtIn;
+  emit({ type: 'system', subtype: 'init', session_id: id, tools, mcp_servers: Object.entries(mcp.mcpServers).map(([name, server]) => ({ name, status: server.command === 'missing-binary' ? 'failed' : 'connected' })) });
+  scenarioOutput = JSON.stringify({ argv, mcp, settings });
+}
 // One variable of the worker's environment, for a test of `env`.
 if (prompt.startsWith('fixture:env:')) scenarioOutput = process.env[prompt.slice('fixture:env:'.length)] ?? 'unset';
 // A worker that deletes its own scratch folder before it is done.

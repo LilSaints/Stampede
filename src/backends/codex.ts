@@ -1,5 +1,8 @@
 import type { AgentLaunch } from './adapter.js';
 const quote = JSON.stringify;
+const bare = (key: string) => /^[A-Za-z0-9_-]+$/.test(key) ? key : quote(key);
+/** A config value as TOML for `-c`: JSON's string escapes are TOML's, tables go inline. */
+const toml = (value: unknown): string => Array.isArray(value) ? `[${value.map(toml).join(',')}]` : value && typeof value === 'object' ? `{${Object.entries(value).map(([k, v]) => `${bare(k)}=${toml(v)}`).join(',')}}` : typeof value === 'string' ? quote(value) : String(value);
 export function codexArgv(a: AgentLaunch, options: { resumeThreadId?: string; platform?: string } = {}) {
   const argv = [...(a.entry ? [a.entry] : []), 'exec', '--json', '--ignore-user-config'];
   if ((options.platform ?? process.platform) === 'win32') argv.push('-c', `windows.sandbox=${quote(a.windowsSandbox)}`);
@@ -24,6 +27,11 @@ export function codexArgv(a: AgentLaunch, options: { resumeThreadId?: string; pl
     '-c', `mcp_servers.stampede.env={${Object.entries({ ...a.mcpEnv, STAMPEDE_HUB_URL: a.hubUrl, STAMPEDE_AGENT_TOKEN: a.token, ...(a.mcpTools ? { STAMPEDE_AGENT_TOOLS: a.mcpTools.join(',') } : {}) }).map(([k, v]) => `${quote(k)}=${quote(v)}`).join(',')}}`,
     '-c', 'mcp_servers.stampede.tool_timeout_sec=120', '-c', 'mcp_servers.stampede.default_tools_approval_mode="approve"'
   );
+  // The call's other servers, field by field; with approval_policy="never" a tool needing approval is refused (V-16).
+  for (const [name, server] of Object.entries(a.mcpServers ?? {})) {
+    for (const [key, value] of Object.entries(server)) if (key !== 'default_tools_approval_mode') argv.push('-c', `mcp_servers.${name}.${bare(key)}=${toml(value)}`);
+    argv.push('-c', `mcp_servers.${name}.default_tools_approval_mode="approve"`);
+  }
   if (options.resumeThreadId) argv.push('resume', options.resumeThreadId);
   argv.push('-');
   return argv;
