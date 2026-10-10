@@ -162,6 +162,17 @@ test('an agent that fails for good wakes the orchestrator mid-run with a toast',
   expect(state.toastPending?.[0]?.text).toBe('review: explore-projects failed');
   expect(wakeSummary(wakePrompt(state), state.runs)).toBe('review: explore-projects failed');
 });
+test('a refused agent() call wakes the orchestrator with its reason, named or not', async () => {
+  const message = 'timeoutMs 21600000 ms (6 h) exceeds limits.turnTimeoutMs, 14400000 ms (4 h): ask for less';
+  const events = [{ runId: 'owned', hubSeq: 5, type: 'agent.refused', data: { name: 'reviewer', error: { message } } }, { runId: 'owned', hubSeq: 6, type: 'agent.refused', data: { error: { message: 'invalid access level' } } }];
+  const state = reduce(initialState(), { hubSeq: 6, uiApiVersion: 1, runs: [{ ...run(), name: 'review' }] }, events, 'owner', 100);
+  expect(state.pendingWake.map(w => w.text)).toEqual([
+    `run owned "review": agent reviewer was refused before launch, so it threw (null in parallel() or pipeline()): ${JSON.stringify(message)}`,
+    'run owned "review": an agent() call was refused before launch, so it threw (null in parallel() or pipeline()): "invalid access level"'
+  ]);
+  expect(state.toastPending?.map(t => t.text)).toEqual(['review: reviewer refused', 'review: agent() refused']);
+  expect(wakeSummary(wakePrompt(state), state.runs)).toBe('review: reviewer refused · review: agent() refused');
+});
 test('a waiting checkpoint wakes the orchestrator; a run end names its cancelled agents and where their work is', async () => {
   const runs = [{ ...run(), name: 'review' }];
   const asked = reduce(initialState(), { hubSeq: 1, uiApiVersion: 1, runs }, [{ runId: 'owned', hubSeq: 1, type: 'checkpoint.waiting', data: { name: 'scope', occ: 1, data: { files: 2 } } }], 'owner', 100);

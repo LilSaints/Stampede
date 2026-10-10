@@ -1,6 +1,6 @@
 {
   "name": "stampede",
-  "version": "1.0.0-rc.14",
+  "version": "1.0.0-rc.15",
   "description": "Run deterministic workflows over communicating Claude Code and Codex workers.",
   "author": {
     "name": "Marco Santini"
