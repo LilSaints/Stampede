@@ -254,3 +254,12 @@ The actual terminal Wake now button passes at 40, 100 and 160 columns. Each fixt
 Fresh local checks pass: 48 core tests, 22 plugin tests, strict validation, core/mod TypeScript, and isolated installation without node_modules. The full core run initially exposed a long-poll timeout assumption under load; polling now waits for terminal status within a bounded deadline, and the full rerun passes in 62.4 seconds. Fresh packaging connects MCP, verifies worker exclusion and returns 42; evidence: `artifacts/s17-final-current/summary.json`.
 
 Desktop discovery and state inspection now work, but activation failed twice after refreshing window selection. The live desktop checklist remains blocked on bringing Claude's Code tab to the foreground. [V1_ACCEPTANCE.md](../docs/V1_ACCEPTANCE.md) records the requirement audit and remaining release sequence. These results supersede earlier pending real-backend and terminal-wake statements; no stable release or desktop acceptance is claimed.
+
+## Protected files and read-only shells — 2026-10-12
+
+`claude-protect-shell.mjs` (Claude Code 2.1.292, Haiku, Windows) qualifies the Claude side of `protect` and `shell`. Evidence: `artifacts/claude-protect-shell-20261012/summary.json`.
+
+| Probe | Observed result | Consequence |
+|---|---|---|
+| `Edit`/`Write` deny rules for `HANDOFF.md` and `docs/**`, permission mode `acceptEdits` | `./HANDOFF.md` (relative to the worker's cwd) and the plain absolute form `C:/…/HANDOFF.md` were enforced: both files unchanged, two `permission_denials`, the unprotected file edited. The `//C:/…` form was not enforced: all three files changed. | `protect` writes `Edit(./<path>)` and `Write(./<path>)`, the worker's cwd being its worktree's root. The hub's own state and worktree denials (plain absolute form) hold on Windows; on macOS and Linux Claude reads `/path` as project-relative, which this probe does not cover. |
+| Read-only worker, permission mode `default`, `--allowedTools … Bash(git status:*) Bash(mkdir allowed-dir)`, Edit/Write/NotebookEdit denied | `git status` and `mkdir allowed-dir` ran; `mkdir other-dir` was refused (`permission_denials`). In an earlier run with only `Bash(git status:*)` allowed, `git log` also ran: Claude runs commands it classifies as read-only without a rule. | `shell: true` uses `default` mode and the `claude.editShellAllow` entries, as edit workers do. The allowlist limits commands that change things, not read-only ones. |

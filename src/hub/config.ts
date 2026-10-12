@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.17';
+export const VERSION = '1.0.0-rc.18';
 export const UI_API_VERSION = 1;
 /** Claude tools workers never need: scheduling, remote triggers, notifications, design sync and worktree switching. */
 export const WORKER_DENY_TOOLS = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree', 'ExitWorktree'];
@@ -86,7 +86,7 @@ export function validateConfig(config: Config) {
  */
 export function settingsReport(config: Config) {
   const warnings: string[] = [];
-  if (!config.claude.editShellAllow.length) warnings.push('Claude agents with edit access get no shell (claude.editShellAllow is empty): they can edit files but not run builds or tests');
+  if (!config.claude.editShellAllow.length) warnings.push('Claude agents with edit access get no shell, and read-only ones cannot ask for one (shell: true), while claude.editShellAllow is empty: they cannot run builds or tests');
   if (!config.allowFullAccess) warnings.push("access 'full' is refused (allowFullAccess is false)");
   // Codex runs workers with --ignore-user-config, so its own reviewer decides on risky commands unless this says otherwise.
   if (config.allowFullAccess && config.codex.approvalsReviewer === null) warnings.push('Codex agents, even with full access, have risky commands checked by Codex\'s automatic reviewer, which can refuse them ("blocked by policy"); set codex.approvalsReviewer to "user" to leave them to the access level alone');

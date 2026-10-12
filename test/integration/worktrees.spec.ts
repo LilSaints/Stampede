@@ -101,3 +101,52 @@ return { coder: await workspace("coder"), fixer: await workspace("fixer") };`);
     assert.equal(other.agents[0]!.workspace.branchDeletedAt, undefined, 'an unmerged branch stays');
   } finally { await hub.close(); await rm(root, { recursive: true, force: true, maxRetries: 5 }); }
 });
+test('an agent\'s protected files end unchanged on its branch, and a read-only worker with a shell runs in a worktree thrown away at its end', { timeout: 120000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-protect-shell-'));
+  const cwd = path.join(root, 'work'); await mkdir(path.join(cwd, 'docs'), { recursive: true });
+  await git(cwd, ['init']); await git(cwd, ['config', 'user.name', 'Stampede fixture']); await git(cwd, ['config', 'user.email', 'fixture@example.invalid']);
+  await writeFile(path.join(cwd, 'HANDOFF.md'), 'handoff'); await writeFile(path.join(cwd, 'docs', 'guide.md'), 'guide'); await git(cwd, ['add', '.']); await git(cwd, ['commit', '-m', 'fixture']);
+  const head = await git(cwd, ['rev-parse', 'HEAD']);
+  const fake: BackendInfo = { available: true, binary: process.execPath, entry: path.resolve('test/fake-backends/cli.mjs'), version: '0.159.2', capabilities: {} };
+  const config = defaults(); config.claude.editShellAllow = ['Bash(npm test)'];
+  const hub = await startHub({ home: path.join(root, 'state'), config, cliEntry: path.resolve('dist/cli.js'), backends: { claude: fake, codex: fake } });
+  const run = async (script: string) => { const { runId } = await hub.manager.start({ cwd, script: meta + script }); await hub.manager.active.get(runId)?.task; return hub.manager.get(runId); };
+  try {
+    // A Codex coder told to keep off HANDOFF.md and docs/** changes them beside its own file: they are put back on its branch.
+    const guarded = await run('await agent("fixture:write:HANDOFF.md|docs/new.md|notes.txt", { name: "coder", backend: "codex", access: "edit", protect: ["HANDOFF.md", "docs/**"] }); return await workspace("coder");');
+    assert.equal(guarded.status, 'completed', JSON.stringify(guarded.error));
+    const coder = guarded.result as any;
+    assert.deepEqual(coder.restored, ['HANDOFF.md', 'docs/new.md']);
+    assert.equal(await git(cwd, ['diff', '--name-only', `${head}..${coder.commit}`]), 'notes.txt');
+    assert.equal(await git(cwd, ['show', `${coder.commit}:HANDOFF.md`]), 'handoff');
+    assert.ok(guarded.log.includes('coder: changed protected files HANDOFF.md, docs/new.md, restored as at its base'), guarded.log.join('\n'));
+    assert.deepEqual((await readJson<any>(path.join(hub.manager.store.runDir(guarded.id), 'result.json')))!.effects[0].restored, ['HANDOFF.md', 'docs/new.md']);
+    // A Claude worker is also denied its file tools on them, and told.
+    const claude = JSON.parse((await run('return await agent("fixture:launch", { name: "guarded", backend: "claude", access: "edit", protect: ["HANDOFF.md", "docs/**"] });')).result as string);
+    for (const rule of ['Edit(./HANDOFF.md)', 'Write(./HANDOFF.md)', 'Edit(./docs/**)', 'Write(./docs/**)']) assert.ok(claude.settings.permissions.deny.includes(rule), rule);
+    assert.match(claude.argv[claude.argv.indexOf('--append-system-prompt') + 1], /Do not change HANDOFF\.md, docs\/\*\*; when you finish, the hub puts any change to them back/);
+    // A read-only tester with a shell gets the allowlisted commands, not plan mode; its worktree goes at its end, build output and all.
+    const tested = await run(`
+const launch = await agent("fixture:launch", { name: "tester", backend: "claude", access: "read-only", isolation: "worktree", shell: true });
+await agent("fixture:write:dist/out.txt", { name: "builder", backend: "claude", access: "read-only", isolation: "worktree", shell: true });
+return { launch: JSON.parse(launch), builder: await workspace("builder") };`);
+    assert.equal(tested.status, 'completed', JSON.stringify(tested.error));
+    const { launch, builder } = tested.result as any;
+    assert.equal(launch.argv[launch.argv.indexOf('--permission-mode') + 1], 'default');
+    const allowed = launch.argv.slice(launch.argv.indexOf('--allowedTools') + 1, launch.argv.indexOf('--disallowedTools')), denied = launch.argv.slice(launch.argv.indexOf('--disallowedTools') + 1);
+    assert.ok(allowed.includes('Bash(npm test)')); assert.ok(denied.includes('Edit') && denied.includes('Write') && !denied.includes('Bash'), denied.join(' '));
+    assert.match(launch.argv[launch.argv.indexOf('--append-system-prompt') + 1], /Your worktree is thrown away when you finish/);
+    assert.equal(builder.kept, false); assert.equal(await exists(builder.path), false);
+    assert.equal(await git(cwd, ['branch', '--list', builder.branch]), '');
+    assert.ok(!tested.cacheReport?.notCacheable.some(entry => entry.label === 'builder'), 'a read-only shell worker stays cacheable');
+    // What the options cannot do is refused.
+    for (const [opts, error] of [
+      ['{ backend: "codex", access: "read-only", isolation: "worktree", shell: true }', /shell is for Claude workers/],
+      ['{ backend: "claude", access: "edit", shell: true }', /shell is for access 'read-only' with isolation 'worktree'/],
+      ['{ backend: "claude", shell: true }', /shell needs isolation 'worktree'/],
+      ['{ backend: "claude", tools: ["Bash"] }', /tools cannot include Bash: read-only access has no shell without shell: true/],
+      ['{ backend: "claude", access: "edit", isolation: "shared", protect: ["HANDOFF.md"] }', /protect needs a worktree/],
+      ['{ backend: "claude", access: "edit", protect: ["../outside.md"] }', /protect must be a list of at most 50 paths or globs/],
+    ] as const) assert.match(String((await run(`return await agent("fixture:argv", ${opts});`)).error?.message), error, opts);
+  } finally { await hub.close(); await rm(root, { recursive: true, force: true }).catch(() => {}); }
+});

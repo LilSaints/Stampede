@@ -26,7 +26,8 @@ export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
     // messaging writes, and the actions of the MCP servers a call asks for.
     // Explicit tool grants plus edit/shell denials preserve filesystem
     // read-only access while allowing coordination.
-    if (a.access === 'read-only') { argv.push('--permission-mode', a.comms || servers.length ? 'default' : 'plan'); denied.push('Edit', 'Write', 'NotebookEdit', 'Bash', 'PowerShell'); }
+    // A read-only worker with a shell runs the edit workers' allowlisted commands; plan mode would forbid them.
+    if (a.access === 'read-only') { argv.push('--permission-mode', a.comms || servers.length || a.shell ? 'default' : 'plan'); denied.push('Edit', 'Write', 'NotebookEdit'); if (a.shell) tools.push(...(a.editShellAllow ?? [])); else denied.push('Bash', 'PowerShell'); }
     else { argv.push('--permission-mode', 'acceptEdits', ...(a.writableDirs?.length ? ['--add-dir', ...a.writableDirs] : [])); tools.push('Edit', 'Write', 'NotebookEdit', ...(a.editShellAllow ?? [])); if (!a.editShellAllow?.length) denied.push('Bash', 'PowerShell'); }
     argv.push('--allowedTools', ...tools);
   }

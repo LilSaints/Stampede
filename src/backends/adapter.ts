@@ -20,6 +20,8 @@ export interface AgentLaunch {
   denyTools?: string[]; skills?: boolean;
   /** The call's built-in Claude tools (`--tools`); without it, all of them. */
   tools?: string[];
+  /** A read-only Claude worker that may run the `editShellAllow` commands (in a worktree thrown away at its end). */
+  shell?: boolean;
   /** The call's other MCP servers, resolved and in the backend's shape: Claude's are in `mcpPath` beside Stampede's, Codex's go on its argv. */
   mcpServers?: Record<string, Record<string, unknown>>;
   disableHooks?: boolean; extraEnv?: Record<string, string>; mcpEnv?: Record<string, string>;

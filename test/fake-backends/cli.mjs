@@ -15,8 +15,8 @@ if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 auth
 if (prompt === 'rate-limit') { emit({ type: 'turn.failed', error: { message: '429 rate limit fixture' } }); process.exit(1); }
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
-// A file of its own, so each agent of a chain adds a change; and a worktree locked, which git then refuses to remove.
-if (prompt.startsWith('fixture:write:')) await writeFile(prompt.slice('fixture:write:'.length), 'written by fixture\n');
+// Files of its own ('|' between them), so each agent of a chain adds a change; and a worktree locked, which git then refuses to remove.
+if (prompt.startsWith('fixture:write:')) for (const file of prompt.slice('fixture:write:'.length).split('|')) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, 'written by fixture\n'); }
 if (prompt === 'fixture:lock-worktree') execFileSync('git', ['worktree', 'lock', '--reason', 'fixture', process.cwd()], { windowsHide: true });
 if (/^fixture:recovery:[ab]$/.test(prompt)) {
   await mkdir('.stampede', { recursive: true });
