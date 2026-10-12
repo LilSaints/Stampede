@@ -14,8 +14,9 @@ export async function repoRoot(cwd: string) { try { return await git(cwd, ['rev-
  * `rootBaseCommit` and `chain`: where a chain of baseRef agents began, and their names from its first agent to this one.
  * `releasedAt`: when workflow_control release removed the kept worktree (`kept` is then false; branch and commit stay);
  * `branchDeletedAt`: when it deleted the branch, whose work was in the checkout's HEAD.
+ * `restored`: the files of its call's `protect` it changed, which the hub put back as they were at its base.
  */
-export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; rootBaseCommit?: string; chain?: string[]; commit?: string; kept?: boolean; releasedAt?: string; branchDeletedAt?: string }
+export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; rootBaseCommit?: string; chain?: string[]; commit?: string; kept?: boolean; releasedAt?: string; branchDeletedAt?: string; restored?: string[] }
 /** A git ref's commit in the repository holding `cwd`; a worktree problem, not a backend's, when it has none. */
 export async function resolveCommit(cwd: string, ref: string) {
   const repo = await repoRoot(cwd);
@@ -43,38 +44,72 @@ export async function createWorkspace(cwd: string, runId: string, name: string, 
   });
 }
 /**
- * Removes a clean worktree. A path past Windows' 260 characters needs
- * core.longpaths, and a file another process still holds may be let go: it
- * retries, then deletes the folder and prunes git's record of it. A worktree
+ * Removes a clean worktree, or with `force` one with changes (a read-only
+ * agent's, thrown away whatever it holds). A path past Windows' 260 characters
+ * needs core.longpaths, and a file another process still holds may be let go:
+ * it retries, then deletes the folder and prunes git's record of it. A worktree
  * git refuses (locked, changed, with submodules) is never deleted.
  */
-export async function removeWorktree(repo: string, target: string) {
+export async function removeWorktree(repo: string, target: string, force = false) {
   let failure!: Error;
   for (const wait of [0, 250, 1000]) {
     if (wait) await new Promise(resolve => setTimeout(resolve, wait));
-    try { await git(repo, ['-c', 'core.longpaths=true', 'worktree', 'remove', target]); return; } catch (error) { failure = error as Error; }
+    try { await git(repo, ['-c', 'core.longpaths=true', 'worktree', 'remove', ...(force ? ['--force'] : []), target]); return; } catch (error) { failure = error as Error; }
     if (/locked|--force|-f -f|submodule/i.test(failure.message)) throw failure;
   }
   await rm(target, { recursive: true, force: true, maxRetries: 3 }).catch(() => { throw failure; });
   await git(repo, ['worktree', 'prune']);
 }
-export async function finishWorkspace(workspace: Workspace, name: string, snapshot: boolean, note?: (message: string) => Promise<void>) {
+/** `protect` patterns as git pathspecs from the worktree's root: `*` within a folder, `**` across folders; without case where Windows has none. */
+const protectPathspecs = (patterns: string[]) => patterns.map(pattern => `:(glob${process.platform === 'win32' ? ',icase' : ''})${pattern}`);
+/** `git diff --name-status -z` as path → status (A: not in the first tree). */
+const statuses = (output: string) => { const parts = output.split('\0'), found = new Map<string, string>(); for (let i = 0; i + 1 < parts.length; i += 2) if (parts[i + 1]) found.set(parts[i + 1]!, parts[i]!); return found; };
+/**
+ * Puts each file a `protect` pattern matches back as it was at the worktree's
+ * base: a change the agent committed is undone in a commit of its own, an
+ * uncommitted one or a new untracked file is dropped. Returns their paths.
+ */
+async function restoreProtected(workspace: Workspace, name: string, patterns: string[]) {
+  const specs = protectPathspecs(patterns), base = workspace.baseCommit!, cwd = workspace.path;
+  const committed = statuses(await git(cwd, ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD', '--', ...specs]));
+  const changed = new Map([...committed, ...statuses(await git(cwd, ['diff', '--name-status', '-z', '--no-renames', base, '--', ...specs]))]);
+  const untracked = (await git(cwd, ['ls-files', '--others', '--exclude-standard', '-z', '--', ...specs])).split('\0').filter(Boolean);
+  for (const file of untracked) await rm(path.join(cwd, file), { force: true });
+  const inBase = [...changed].filter(([, status]) => status !== 'A').map(([file]) => file), added = [...changed].filter(([, status]) => status === 'A').map(([file]) => file);
+  if (inBase.length) await git(cwd, ['--literal-pathspecs', 'restore', `--source=${base}`, '--staged', '--worktree', '--', ...inBase]);
+  if (added.length) await git(cwd, ['--literal-pathspecs', 'rm', '-q', '-f', '--ignore-unmatch', '--', ...added]);
+  if (committed.size) await git(cwd, ['--literal-pathspecs', '-c', 'core.hooksPath=', 'commit', '-q', '-m', `stampede: restore the protected files ${name} changed`, '--only', '--', ...committed.keys()]);
+  return [...new Set([...changed.keys(), ...untracked])].sort();
+}
+/**
+ * An agent's worktree as it ends. `protect`: the files its call protects are
+ * put back first (restoreProtected). `snapshot`: what it left uncommitted is
+ * committed. `discard`: removed whatever it holds, branch and all.
+ */
+export async function finishWorkspace(workspace: Workspace, name: string, options: { snapshot?: boolean; discard?: boolean; protect?: string[]; note?: (message: string) => Promise<void> } = {}) {
   if (workspace.kind !== 'worktree' || !workspace.repo) return workspace;
+  const { snapshot, discard, protect, note } = options;
+  const reason = (error: unknown) => (error as Error).message.split(/\r?\n/)[0]!.replace(/^fatal: /, '');
   return repoMutex(workspace.repo).run(async () => {
-    let dirty = await git(workspace.path, ['status', '--porcelain']);
+    if (protect?.length && !discard) {
+      try {
+        const restored = await restoreProtected(workspace, name, protect);
+        if (restored.length) { workspace.restored = restored; await note?.(`${name}: changed protected file${restored.length === 1 ? '' : 's'} ${restored.slice(0, 10).join(', ')}${restored.length > 10 ? ` and ${restored.length - 10} more` : ''}, restored as at its base`); }
+      } catch (error) { await note?.(`${name}: could not restore its protected files (${reason(error)}), so its worktree may change them`); }
+    }
+    let dirty = discard ? '' : await git(workspace.path, ['status', '--porcelain']);
     if (dirty && snapshot) {
       await git(workspace.path, ['add', '-A']);
       await git(workspace.path, ['-c', 'core.hooksPath=', 'commit', '-m', `stampede: snapshot of ${name} at done`]);
       dirty = await git(workspace.path, ['status', '--porcelain']);
     }
     workspace.commit = await git(workspace.path, ['rev-parse', 'HEAD']);
-    workspace.kept = Boolean(dirty) || workspace.commit !== workspace.baseCommit;
-    // An unkept branch holds nothing past its base; a base from another agent's
+    workspace.kept = !discard && (Boolean(dirty) || workspace.commit !== workspace.baseCommit);
+    // An unkept branch holds nothing past its base, or nothing to keep; a base from another agent's
     // branch (baseRef) is not merged into the checkout, so -d would refuse it.
     // One git cannot remove is kept, and the run log says why: the agent's work is done all the same.
-    const reason = (error: unknown) => (error as Error).message.split(/\r?\n/)[0]!.replace(/^fatal: /, '');
     if (!workspace.kept) {
-      try { await removeWorktree(workspace.repo!, workspace.path); }
+      try { await removeWorktree(workspace.repo!, workspace.path, discard); }
       catch (error) { workspace.kept = true; await note?.(`${name}: kept its worktree ${workspace.path}, which git could not remove (${reason(error)}); workflow_control release removes it later`); return workspace; }
       await git(workspace.repo!, ['branch', '-D', workspace.branch!]).catch(error => note?.(`${name}: kept branch ${workspace.branch}, which git could not delete (${reason(error)})`));
     }

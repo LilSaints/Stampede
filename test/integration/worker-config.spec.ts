@@ -66,8 +66,9 @@ test('a call chooses its worker\'s built-in tools, MCP servers and plugins', { t
     assert.ok(missing.log.some(line => line.startsWith('lost: mcpServers: no MCP server named nowhere in your Claude Code config')), missing.log.join('\n'));
     // What the hub would never give, or a backend cannot take, fails the call.
     for (const [opts, error] of [
-      ['{ backend: "claude", tools: ["Read", "Edit"] }', /tools cannot include Edit: read-only access has no edit or shell tools/],
+      ['{ backend: "claude", tools: ["Read", "Edit"] }', /tools cannot include Edit: read-only access has no edit tools/],
       ['{ backend: "claude", access: "edit", tools: ["Bash"] }', /tools cannot include Bash: edit access has no shell while claude.editShellAllow is empty/],
+      ['{ backend: "claude", access: "read-only", isolation: "worktree", shell: true }', /shell runs the claude.editShellAllow commands, and that list is empty/],
       ['{ backend: "claude", tools: ["Workflow"] }', /tools cannot include Workflow: workers never start agents, teams or workflows/],
       ['{ backend: "claude", tools: ["CronCreate"] }', /tools cannot include CronCreate: claude.denyTools removes it/],
       ['{ backend: "codex", tools: ["Read"] }', /tools is for Claude workers/],

@@ -28,6 +28,10 @@ export interface AgentOpts {
   mcpServers?: McpServerEntry[];
   /** Claude only: plugins turned on or off for this worker by id (name@marketplace), bare name, or `*` for every one the user has. */
   plugins?: Record<string, boolean>;
+  /** Claude only, `access: 'read-only'` with `isolation: 'worktree'`: the worker may run the claude.editShellAllow commands; its worktree is thrown away at its end whatever it holds. */
+  shell?: boolean;
+  /** Files the worker must not change, as paths or globs from its worktree's root (`HANDOFF.md`, `docs/**`): Claude's file tools are denied them, and at its end the hub puts any change to them back as it was at its base. */
+  protect?: string[];
 }
 export interface Agent {
   id: string; runId: string; name: string; label: string; phase?: string; role?: string; backend: 'claude' | 'codex'; mode: 'oneshot';
