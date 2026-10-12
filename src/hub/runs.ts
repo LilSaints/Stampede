@@ -36,7 +36,7 @@ const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, 
 interface AgentContext {
   agent: Agent; opts: AgentOpts; prompt: string; abort: AbortController; token: string; tokenHash: string; done: Promise<unknown>; resolve: (value: unknown) => void;
   task?: Promise<void>; handle?: TurnHandle; release?: (id?: string) => void; tainted: boolean; resumeScheduled: boolean; launch?: AgentLaunch;
-  key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; cached?: boolean; autoDone: boolean; base?: string;
+  key?: string; occ?: number; inputs?: unknown; cacheable?: boolean; uncacheable?: string; cached?: boolean; autoDone: boolean; base?: string;
   finishing?: Promise<void>; requestedTerminal?: Agent['status']; retryRequested?: boolean; resumeLimitNotified?: boolean;
   shared: { reads: string[]; writes: string[] };
   /** A Codex turn being cut after a tool call to deliver the orchestrator's message, and how many times it was. */
@@ -61,6 +61,22 @@ const TOOL_ITEMS = ['command_execution', 'file_change', 'mcp_tool_call', 'web_se
 const ARGS_MAX_BYTES = 4 * 1024 * 1024;
 /** A scratch folder longer than this, on Windows, gets a note: it leaves under 160 of the 260-character path limit. */
 const SCRATCH_PATH_WARN = 100;
+/**
+ * Checkpoint data too long for its event: an object keeps its keys and its
+ * summary (or message), which the wake shows; anything else is cut.
+ * workflow_status gives the whole of it.
+ */
+function checkpointPreview(data: unknown, text: string) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return text.slice(0, 2000) + '…';
+  return Object.fromEntries(Object.entries(data).map(([key, value]) => [key, ['summary', 'message'].includes(key) && typeof value === 'string' ? value.slice(0, 1000) : '…']));
+}
+/** Which parts of an agent's call differ from the run it resumes, in words. */
+function changedParts(before: Record<string, string> | undefined, after: Record<string, string>, backend: string, headKeyed: boolean) {
+  if (!before) return 'its call differs (prompt, options, args, workspace or backend)';
+  const words: Record<string, string> = { call: 'its prompt or options', base: 'the commit it starts from', reads: 'a worktree it reads', args: "the run's args", workspace: headKeyed ? "the checkout's commit or its cacheInputs (a worktree agent started from a baseRef commit does not depend on the checkout's commit)" : "the checkout's files or its cacheInputs", backend: `the ${backend} version (${before.backend || 'unknown'} → ${after.backend || 'unknown'})`, settings: `the hub's ${backend} settings` };
+  const changed = Object.keys(words).filter(part => before[part] !== after[part]).map(part => words[part]);
+  return changed.length ? `changed: ${changed.join('; ')}` : 'its call differs';
+}
 /** A duration as a refusal states it: `14400000 ms (4 h)`. */
 const span = (ms: number) => `${ms} ms (${ms >= 3600000 ? `${+(ms / 3600000).toFixed(1)} h` : ms >= 60000 ? `${+(ms / 60000).toFixed(1)} min` : `${+(ms / 1000).toFixed(1)} s`})`;
 export const LOCK_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -155,7 +171,7 @@ export class RunManager extends EventEmitter {
     const run: Run = { id, name: title || parsed.meta.name, ...(title ? { title } : {}), ...(resumeOf && input.continueInterrupted === false ? { continueInterrupted: false } : {}), cwd, scriptPath, scriptSha256: hash(source), args, status: 'running', resumeOf, phases: parsed.meta.phases ?? [], createdAt: now(), startedAt: now(), budget: { totalTokens: input.budgetTokens ?? null, spentTokens: 0, totalUsd: input.budgetUsd ?? null, spentUsd: 0 }, ...(input.notifyAgents ? { notifyAgents: true } : {}), counters: { agentsStarted: 0, agentsRunning: 0, messages: 0 }, orchestratorSessionId: input.orchestratorSessionId, agents: [], log: [], defaultBackend: backend, seenSeq: {}, readSeq: {}, cacheHits: 0, liveCalls: 0 };
     await this.store.write(path.join(directory, 'args.json'), run.args);
     const execution = new RunExecution(this, run, effective);
-    run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools };
+    run.cacheReport = { notCacheable: execution.cache.notCacheable, verificationFailures: execution.cache.verificationFailures, cachedExternalTools: execution.cache.cachedExternalTools, misses: execution.cache.misses };
     const limits = effective.scheduler;
     this.scheduler.configureRun(id, { global: limits.maxConcurrent, perRun: limits.perRun, claude: limits.claude.maxConcurrent, codex: limits.codex.maxConcurrent, reserve: limits.nonCommsReserve, admissionMaxMs: limits.admissionMaxMs });
     if (resumeOf) await execution.cache.load(this.store.runDir(resumeOf));
@@ -342,7 +358,7 @@ export class RunExecution {
       this.abort.signal.addEventListener('abort', abort, { once: true });
       waiters.push({ record, settle: answer => { leave(); Object.assign(record, { status: 'answered', answer, answeredAt: now() }); resolve(answer); } });
       this.checkpointWaiters.set(name, waiters);
-      void this.event('checkpoint.waiting', { name, occ, data: text.length > 2000 ? text.slice(0, 2000) + '…' : data, timeoutMs }).catch(e => this.fail(e));
+      void this.event('checkpoint.waiting', { name, occ, data: text.length > 2000 ? checkpointPreview(data, text) : data, timeoutMs }).catch(e => this.fail(e));
     });
   }
   /** The orchestrator's answer to the oldest waiting checkpoint of that name. */
@@ -508,21 +524,44 @@ export class RunExecution {
   private async identifyCall(c: AgentContext, refresh = false) {
     if (c.key !== undefined && !refresh) return;
     const previousKey = c.key;
-    const inputs = await fingerprint(c.agent.workspace.path, c.agent.workspace.kind, c.opts.cacheInputs ?? [], this.config.cache, this.fingerprints);
+    let inputs = await fingerprint(c.agent.workspace.path, c.agent.workspace.kind, c.opts.cacheInputs ?? [], this.config.cache, this.fingerprints);
+    // A worktree started from a given commit holds that commit whatever the checkout's HEAD is now, so landing other work leaves it reusable.
+    if (c.agent.workspace.kind === 'worktree' && c.base !== undefined && inputs.cacheable) inputs = { ...inputs, workspace: c.base };
     c.inputs = inputs;
     const agentType = c.agent.backend === 'codex' && c.opts.agentType ? this.config.codex.agentTypes[c.opts.agentType] : undefined;
     const model = c.opts.model ?? agentType?.model ?? (c.agent.backend === 'codex' ? this.config.codex.defaultModel : undefined);
     const effort = c.opts.effort ?? agentType?.effort ?? (c.agent.backend === 'codex' ? this.config.codex.defaultEffort : undefined);
     // Whether the orchestrator hears of it changes nothing the agent does.
     const { notify: _notify, ...opts } = c.opts;
-    c.key = hash(canonical({ spec: { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType, base: c.base }, args: this.run.args, inputs, backendVersion: this.manager.backends[c.agent.backend].version, settings: c.agent.backend === 'claude' ? this.config.claude : this.config.codex }));
+    // A reviewer's answer rests on the worktrees it reads, so their commits are part of its call; one still being written has none yet.
+    const reads = c.opts.readWorktrees?.length ? c.opts.readWorktrees.map(name => { const a = this.run.agents.find(x => x.name === name); return [name, a?.workspace.kind === 'worktree' && agentTerminal(a.status) ? a.workspace.commit ?? null : null]; }) : undefined;
+    const spec = { prompt: c.prompt, ...opts, backend: c.agent.backend, access: c.agent.access, isolation: c.agent.workspace.kind, cwd: c.agent.workspace.path, model, effort, agentType, base: c.base, reads };
+    const backendVersion = this.manager.backends[c.agent.backend].version, settings = c.agent.backend === 'claude' ? this.config.claude : this.config.codex;
+    c.key = hash(canonical({ spec, args: this.run.args, inputs, backendVersion, settings }));
     if (previousKey !== c.key) c.occ = this.cache.next(c.key);
     c.agent.callKey = c.key; c.agent.callOcc = c.occ;
+    // What the key is made of, so that a run resuming this one can say which part changed.
+    c.agent.callParts = { call: hash(canonical({ ...spec, base: undefined, reads: undefined })), base: c.base ?? '', reads: hash(canonical(reads ?? null)), args: hash(canonical(this.run.args ?? null)), workspace: hash(canonical(inputs)), backend: String(backendVersion ?? ''), settings: hash(canonical(settings)) };
     // A full-access agent can change anything, so it is reused only where its call says (cache: 'commit') that
     // its worktree's commit is its one lasting effect; a resume checks its branch is still at that commit.
     const fullUnverified = c.agent.access === 'full' && c.opts.cache !== 'commit';
-    c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && !fullUnverified && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
-    if (!c.cacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.opts.cache === 'never' ? 'cache disabled' : !inputs.cacheable ? 'workspace fingerprint unavailable' : fullUnverified ? "full access: unverifiable effects (cache: 'commit' reuses it when its worktree commit is its only lasting effect)" : 'unverifiable workspace effects' });
+    const readsLive = reads?.some(([, commit]) => commit === null) ?? false;
+    c.cacheable = inputs.cacheable && c.opts.cache !== 'never' && !fullUnverified && !readsLive && (c.agent.access === 'read-only' || c.agent.workspace.kind === 'worktree');
+    c.uncacheable = c.cacheable ? undefined : c.opts.cache === 'never' ? 'cache disabled' : !inputs.cacheable ? 'workspace fingerprint unavailable' : fullUnverified ? "full access: unverifiable effects (cache: 'commit' reuses it when its worktree commit is its only lasting effect)" : readsLive ? 'reads a worktree that is still being written' : 'unverifiable workspace effects';
+    if (c.uncacheable && previousKey !== c.key) this.cache.notCacheable.push({ label: c.agent.label, reason: c.uncacheable });
+  }
+  /** Why an agent that the resumed run finished starts again, in the run log: a miss is otherwise silent. */
+  private async explainMiss(c: AgentContext) {
+    const old = this.run.resumeOf ? this.manager.runs.get(this.run.resumeOf) : undefined;
+    const prior = old?.agents.find(a => a.name === c.agent.name && a.status === 'done');
+    if (!old || !prior || c.key === undefined || c.occ === undefined) return;
+    const headKeyed = c.agent.workspace.kind === 'worktree' && c.base === undefined;
+    const reason = prior.callKey !== c.key ? changedParts(prior.callParts, c.agent.callParts!, c.agent.backend, headKeyed)
+      : c.uncacheable ? `not cacheable: ${c.uncacheable}`
+      : c.agent.teamId ? 'a team replays only as a whole, and its team did not finish there or another member changed'
+      : prior.callOcc !== c.occ ? 'identical calls ran in another order' : this.cache.missReason(c.key, c.occ);
+    this.cache.misses.push({ label: c.agent.label, reason });
+    await this.note(`${c.agent.name}: not replayed from ${old.id}: ${reason}`);
   }
   async dispatch(c: AgentContext, preReserved?: (id?: string) => void) {
     c.release = preReserved;
@@ -542,6 +581,7 @@ export class RunExecution {
           this.run.cacheHits++; await this.finish(c, 'done'); return;
         }
       }
+      if (!c.agent.teamId) await this.explainMiss(c);
       // An agent the resumed run lost mid-turn when the hub stopped continues its own session, in its own worktree.
       const prior = await this.interrupted(c);
       if (prior) {
@@ -908,6 +948,7 @@ export class RunExecution {
       await this.recordTeam(team);
       return { id, names };
     }
+    for (const c of contexts) await this.explainMiss(c);
     team.admissionAbort = new AbortController();
     const admission = this.manager.scheduler.acquire(contexts.map(c => this.slot(c)), AbortSignal.any([this.abort.signal, team.admissionAbort.signal]));
     team.admission = admission.then(async release => {

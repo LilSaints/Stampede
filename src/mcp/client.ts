@@ -49,7 +49,7 @@ export class HubClient {
     const health = await fetch(url + '/health', { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) })
       .then(response => response.ok ? response.json() as Promise<{ version?: string }> : undefined, () => undefined);
     if (!health) throw new Error('hub not running');
-    if (health.version !== VERSION) throw new Error(`blocked: hub version ${health.version}, shim version ${VERSION}; run 'stampede hub --restart' after runs finish`);
+    if (health.version !== VERSION) throw new Error(`blocked: hub version ${health.version}, shim version ${VERSION}. If this plugin is the newer one, restart the hub once no run is active: node "${this.cliEntry}" hub --restart --detach. If the hub is newer, run /reload-plugins or restart this session`);
     this.url = url; this.token = token;
   }
   async connect(autoStart = true) {
