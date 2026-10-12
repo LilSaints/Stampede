@@ -261,5 +261,21 @@ Desktop discovery and state inspection now work, but activation failed twice aft
 
 | Probe | Observed result | Consequence |
 |---|---|---|
-| `Edit`/`Write` deny rules for `HANDOFF.md` and `docs/**`, permission mode `acceptEdits` | `./HANDOFF.md` (relative to the worker's cwd) and the plain absolute form `C:/…/HANDOFF.md` were enforced: both files unchanged, two `permission_denials`, the unprotected file edited. The `//C:/…` form was not enforced: all three files changed. | `protect` writes `Edit(./<path>)` and `Write(./<path>)`, the worker's cwd being its worktree's root. The hub's own state and worktree denials (plain absolute form) hold on Windows; on macOS and Linux Claude reads `/path` as project-relative, which this probe does not cover. |
+| `Edit`/`Write` deny rules for `HANDOFF.md` and `docs/**`, permission mode `acceptEdits` | `./HANDOFF.md` (relative to the worker's cwd) and the plain absolute form `C:/…/HANDOFF.md` were enforced: both files unchanged, two `permission_denials`, the unprotected file edited. The `//C:/…` form was not enforced: all three files changed. | Superseded by the next section: `./<name>` also matches that name in subfolders, and the plain absolute form does not hold on Linux. |
 | Read-only worker, permission mode `default`, `--allowedTools … Bash(git status:*) Bash(mkdir allowed-dir)`, Edit/Write/NotebookEdit denied | `git status` and `mkdir allowed-dir` ran; `mkdir other-dir` was refused (`permission_denials`). In an earlier run with only `Bash(git status:*)` allowed, `git log` also ran: Claude runs commands it classifies as read-only without a rule. | `shell: true` uses `default` mode and the `claude.editShellAllow` entries, as edit workers do. The allowlist limits commands that change things, not read-only ones. |
+
+## Absolute paths in deny rules — 2026-10-12
+
+`claude-deny-paths.mjs` denies Read and Edit of one folder in each absolute form and counts Claude's `permission_denials` (#15). Windows: Claude Code 2.1.292. Linux: WSL Ubuntu 22.04, Claude Code 2.1.296. Evidence: `artifacts/claude-deny-paths-win-20261012/summary.json` and `artifacts/claude-deny-paths-linux-20261012/summary.json`.
+
+| Form | Windows | Linux |
+|---|---|---|
+| Plain absolute path, as the hub wrote it before (`C:/Users/…/secret/**`, `/tmp/…/secret/**`) | enforced | **not enforced**: the worker read and edited the denied files |
+| `//` and the POSIX path (`//c/Users/…`, `//tmp/…`) | enforced | enforced |
+| `/c/Users/…` (one slash) | not enforced | (same as plain) |
+| `//C:/Users/…` | not enforced | — |
+| `//C/USERS/…` (other case) | enforced | — |
+| `Edit(./HANDOFF.md)` | also denies `sub/HANDOFF.md` | also denies `sub/HANDOFF.md` |
+| `Edit(//<dir>/HANDOFF.md)` | denies only `<dir>/HANDOFF.md` | denies only `<dir>/HANDOFF.md` |
+
+Consequence: on Linux, and by the same documented rule on macOS, Claude workers' denials of Stampede's state folder and other agents' worktrees did not apply. One leading slash is relative to the settings file's root, as Claude's permissions documentation says. The hub now writes every such rule, and `protect`'s, as `//` plus the POSIX path, Windows drives as `/c/…` (`claudeRulePath`). This is the documented form, measured on Windows and Linux; macOS is not measured.

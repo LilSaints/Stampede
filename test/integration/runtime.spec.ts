@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { git } from '../../src/hub/workspaces.js';
+import { claudeRulePath } from '../../src/backends/claude.js';
 import path from 'node:path';
 import os from 'node:os';
 import { startHub } from '../../src/hub/server.js';
@@ -183,7 +184,7 @@ return { writer: await workspace("writer"), next: await workspace("next"), reade
     await hub.manager.active.get(started.runId)!.task;
     const run = hub.manager.get(started.runId);
     assert.equal(run.status, 'completed', JSON.stringify(run.error));
-    const result = run.result as any, writerRoot = result.writer.path.replaceAll('\\', '/');
+    const result = run.result as any, writerRoot = claudeRulePath(result.writer.path);
     assert.match(result.writer.branch, /\/writer$/); assert.equal(result.writer.kept, true); assert.ok(result.writer.commit);
     // The next agent starts where the writer finished, not at the checkout's HEAD.
     assert.equal(result.next.baseCommit, result.writer.commit);

@@ -8,6 +8,7 @@ import { executeWorkflow } from '../runtime/hooks.js';
 import { parseWorkflow } from '../runtime/parse.js';
 import { type AgentLaunch, type TurnHandle, zeroUsage } from '../backends/adapter.js';
 import { launchTurn } from '../backends/procs.js';
+import { claudeRulePath } from '../backends/claude.js';
 import { codexSchema, jsonAnswer, validateSchema } from '../backends/codexSchema.js';
 import { contract } from '../contract/prompts.js';
 import { agentTools } from '../mcp/tools.js';
@@ -710,9 +711,10 @@ export class RunExecution {
     const readable = new Set(c.opts.readWorktrees ?? []);
     const otherWorktrees = await Promise.all(this.run.agents.filter(p => p.name !== a.name && p.workspace.kind === 'worktree').map(async p => ({ name: p.name, root: p.workspace.repo ? p.workspace.path : path.join(await repoRoot(p.workspace.path) ?? p.workspace.path, '.stampede', 'worktrees', this.run.id.slice(-10).toLowerCase(), p.name) })));
     const denied: [string, string[]][] = [[this.manager.store.home, ['Read', 'Edit', 'Write']], ...otherWorktrees.map(({ name, root }): [string, string[]] => [root, readable.has(name) ? ['Edit', 'Write'] : ['Read', 'Edit', 'Write']])];
-    // The call's protected files, from the worker's cwd (its worktree's root); the hub restores them at its end whatever Claude allows.
-    const protectRules = (c.opts.protect ?? []).flatMap(file => ['Edit', 'Write'].map(tool => `${tool}(./${file})`));
-    await this.manager.store.write(settingsPath, { enabledPlugins: plugins ?? { 'stampede@stampede': false }, permissions: { deny: [...denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${root.replaceAll('\\', '/')}/**)`)), ...protectRules] }, hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } });
+    // The call's protected files, from its worktree's root: absolute, as `./name` would match a bare name at any depth.
+    // The hub restores them at the agent's end whatever Claude allows.
+    const protectRules = (c.opts.protect ?? []).flatMap(file => ['Edit', 'Write'].map(tool => `${tool}(${claudeRulePath(a.workspace.path)}/${file})`));
+    await this.manager.store.write(settingsPath, { enabledPlugins: plugins ?? { 'stampede@stampede': false }, permissions: { deny: [...denied.flatMap(([root, tools]) => tools.map(tool => `${tool}(${claudeRulePath(root)}/**)`)), ...protectRules] }, hooks: { PostToolUse: [{ matcher: '*', hooks: [hook('post-tool-use')] }], Stop: [{ hooks: [hook('stop')] }] } });
     // Every Claude worker reads its inbox after each tool call and before it stops, so the orchestrator can steer any of them.
     // An agent type listing its tools leaves out the structured-output tool, Stampede's and the call's servers': a copy of it adds them.
     let agentType = c.opts.agentType, agentsPath: string | undefined;

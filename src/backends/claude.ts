@@ -1,5 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentLaunch } from './adapter.js';
+/**
+ * A folder as an absolute path in Claude's Read/Edit permission rules: `//` and the path as Claude matches it, POSIX
+ * as it is and Windows `C:\x` as `/c/x`. A single leading slash is relative to the settings' own root, so a POSIX
+ * path written as it is would not apply; on Windows `//C:/x` never applies (measured, spikes/RESULTS.md).
+ */
+export function claudeRulePath(dir: string, platform = process.platform) {
+  const posix = platform === 'win32' ? dir.replaceAll('\\', '/').replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`) : dir;
+  return `/${posix.replace(/\/+$/, '')}`;
+}
 export function claudeArgv(a: AgentLaunch, resumeSessionId?: string) {
   const argv = [...(a.entry ? [a.entry] : []), '-p', '--output-format', 'stream-json', '--verbose', resumeSessionId ? '--resume' : '--session-id', resumeSessionId ?? randomUUID(), '--append-system-prompt', a.contract, '--mcp-config', a.mcpPath, '--settings', a.settingsPath];
   if (!a.inheritMcpServers) argv.push('--strict-mcp-config');
