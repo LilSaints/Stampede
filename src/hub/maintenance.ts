@@ -17,6 +17,49 @@ export async function confirm(message: string, yes = false) {
   try { return /^y(?:es)?$/i.test((await prompt.question(message + ' [y/N] ')).trim()); }
   finally { prompt.close(); }
 }
+/** One line of the user's input, asked on the terminal: init asks through it only where there is one. */
+type Ask = (question: string) => Promise<string>;
+const terminalAsk = (): Ask | undefined => process.stdin.isTTY ? async question => {
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try { return await prompt.question(question); } finally { prompt.close(); }
+} : undefined;
+/** The test command of the project in `cwd`, as a claude.editShellAllow rule, from the files that name its toolchain. */
+export async function suggestedTestCommand(cwd: string) {
+  const names = await readdir(cwd).catch(() => [] as string[]);
+  const has = (name: string) => names.includes(name);
+  return has('package.json') ? 'Bash(npm test)' : has('Cargo.toml') ? 'Bash(cargo test)' : has('go.mod') ? 'Bash(go test ./...)'
+    : names.some(name => /\.(sln|csproj|fsproj)$/i.test(name)) ? 'Bash(dotnet test)' : has('pytest.ini') || has('pyproject.toml') ? 'Bash(pytest)' : undefined;
+}
+/** Rules separated by commas outside their parentheses; a bare command is taken as `Bash(<command>)`. */
+function shellRules(answer: string) {
+  const rules: string[] = []; let depth = 0, start = 0;
+  for (let i = 0; i <= answer.length; i++) {
+    const char = answer[i];
+    if (char === '(') depth++; else if (char === ')') depth = Math.max(0, depth - 1);
+    else if (i === answer.length || char === ',' && !depth) { const rule = answer.slice(start, i).trim(); if (rule) rules.push(/^[A-Za-z]+\(.*\)$/.test(rule) ? rule : `Bash(${rule})`); start = i + 1; }
+  }
+  return rules;
+}
+/**
+ * claude.editShellAllow for a new configuration. It stays empty unless the
+ * user, asked on a terminal, allows commands: any of them makes Claude edit
+ * agents user-trusted (an edit agent can change what the command runs), so
+ * `--yes` or no terminal never opts in. An entry the hub would refuse is asked again.
+ */
+export async function initialShellAllow(seed: Config, cwd: string, ask: Ask | undefined) {
+  if (!ask) return [];
+  const suggestion = await suggestedTestCommand(cwd);
+  let question = 'Claude workers get no shell unless you allow commands (claude.editShellAllow). An allowed command runs code the project defines, and an edit agent can change that code before running it, so allowing any makes Claude edit agents, and read-only ones with shell: true, as trusted as you are.\n'
+    + (suggestion ? `Allow ${suggestion}? y to allow it, other rules separated by commas, or Enter for none: ` : 'Commands to allow, as rules such as Bash(npm test) separated by commas, or Enter for none: ');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const answer = (await ask(question)).trim();
+    if (!answer || /^(?:n|no|none)$/i.test(answer)) return [];
+    const rules = suggestion && /^y(?:es)?$/i.test(answer) ? [suggestion] : shellRules(answer);
+    try { validateConfig({ ...seed, claude: { ...seed.claude, editShellAllow: rules } }); return rules; }
+    catch (error) { question = `${(error as Error).message}. Rules again, or Enter for none: `; }
+  }
+  return [];
+}
 export async function initialize(home: string, yes = false) {
   const configPath = path.join(home, 'config.json');
   if (await readJson(configPath)) throw new Error('config.json already exists; refusing to overwrite it');
@@ -34,7 +77,8 @@ export async function initialize(home: string, yes = false) {
     finally { prompt.close(); }
     if (!['elevated', 'unelevated', 'mxc'].includes(seed.codex.windowsSandbox)) throw new Error('invalid sandbox implementation');
   }
-  process.stderr.write(`Create ${configPath}\nCodex model=${seed.codex.defaultModel}, effort=${seed.codex.defaultEffort}, Windows sandbox=${seed.codex.windowsSandbox}\n`);
+  seed.claude.editShellAllow = await initialShellAllow(seed, process.cwd(), yes ? undefined : terminalAsk());
+  process.stderr.write(`Create ${configPath}\nCodex model=${seed.codex.defaultModel}, effort=${seed.codex.defaultEffort}, Windows sandbox=${seed.codex.windowsSandbox}\nClaude shell commands: ${seed.claude.editShellAllow.join(', ') || 'none (add rules to claude.editShellAllow later to let Claude agents build and test)'}\n`);
   if (!await confirm('Write this configuration?', yes)) return { created: false };
   validateConfig(seed);
   const security = new Security();

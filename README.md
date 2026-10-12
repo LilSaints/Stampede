@@ -7,7 +7,7 @@ Stampede is a Claude Code plugin for running many AI workers at once from a sing
 - **Deterministic and resumable.** Results are cached, so an interrupted or edited workflow resumes without redoing finished work.
 - **Visible.** The `/stampede` pane shows each run, its phases, workers and messages, and wakes your session when a run finishes.
 
-Everything runs locally through a small hub on your machine. Release candidate `1.0.0-rc.19`; see [V1_STATUS.md](docs/V1_STATUS.md).
+Everything runs locally through a small hub on your machine. Release candidate `1.0.0-rc.20`; see [V1_STATUS.md](docs/V1_STATUS.md).
 
 ## Install
 
@@ -24,7 +24,7 @@ claude plugin marketplace add C:\path\to\Stampede
 claude plugin install stampede@stampede --scope user
 ```
 
-`init` reads your Codex defaults and asks before writing Stampede's config; `doctor` checks that the backends and sandbox work. Then run `/reload-plugins` in an open Claude session, or start a new one.
+`init` reads your Codex defaults, asks which shell commands Claude workers may run (it suggests your project's test command, such as `Bash(npm test)`; none unless you choose), and asks before writing Stampede's config; `doctor` checks that the backends and sandbox work. Then run `/reload-plugins` in an open Claude session, or start a new one.
 
 ## Use
 
