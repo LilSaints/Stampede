@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, rm, readFile, copyFile, writeFile } from 'node:fs/promises';
 import { codexArgv } from '../../src/backends/codex.js';
-import { claudeArgv } from '../../src/backends/claude.js';
+import { claudeArgv, claudeRulePath } from '../../src/backends/claude.js';
 import { launchTurn, workerEnv } from '../../src/backends/procs.js';
 import type { AgentLaunch } from '../../src/backends/adapter.js';
 import { defaults } from '../../src/hub/config.js';
@@ -40,6 +40,13 @@ test('an edit worker may also write its scratch folders outside its workspace', 
   const codex = codexArgv({ ...launch('.'), access: 'edit', writableDirs: dirs }, { platform: 'win32' });
   assert.ok(codex.includes('sandbox_workspace_write.writable_roots=["C:\\\\scratch\\\\a","D:\\\\b"]'));
   assert.ok(!codexArgv({ ...launch('.'), access: 'full', writableDirs: dirs }).some(arg => arg.startsWith('sandbox_workspace_write')));
+});
+test('Claude permission rules name folders by the absolute form each platform enforces', () => {
+  // A single leading slash is relative to the settings' root, and Windows paths match as /c/…, so both platforms take //.
+  assert.equal(claudeRulePath('/home/fixture/.stampede', 'linux'), '//home/fixture/.stampede');
+  assert.equal(claudeRulePath('/Users/fixture/repo/.stampede/worktrees/run/agent/', 'darwin'), '//Users/fixture/repo/.stampede/worktrees/run/agent');
+  assert.equal(claudeRulePath('C:\\Users\\Fixture\\.stampede', 'win32'), '//c/Users/Fixture/.stampede');
+  assert.equal(claudeRulePath('D:\\work\\repo\\', 'win32'), '//d/work/repo');
 });
 test('Codex resume preserves all options before the resume tail', () => {
   const a = { ...launch('.'), comms: true, token: 'test-token' };

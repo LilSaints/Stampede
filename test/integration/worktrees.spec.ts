@@ -7,6 +7,7 @@ import { startHub } from '../../src/hub/server.js';
 import { defaults } from '../../src/hub/config.js';
 import type { BackendInfo } from '../../src/hub/capabilities.js';
 import { git } from '../../src/hub/workspaces.js';
+import { claudeRulePath } from '../../src/backends/claude.js';
 import { readJson } from '../../src/hub/store.js';
 
 const meta = 'export const meta = { name: "worktrees", description: "kept worktrees" };\n';
@@ -122,8 +123,10 @@ test('an agent\'s protected files end unchanged on its branch, and a read-only w
     assert.ok(guarded.log.includes('coder: changed protected files HANDOFF.md, docs/new.md, restored as at its base'), guarded.log.join('\n'));
     assert.deepEqual((await readJson<any>(path.join(hub.manager.store.runDir(guarded.id), 'result.json')))!.effects[0].restored, ['HANDOFF.md', 'docs/new.md']);
     // A Claude worker is also denied its file tools on them, and told.
-    const claude = JSON.parse((await run('return await agent("fixture:launch", { name: "guarded", backend: "claude", access: "edit", protect: ["HANDOFF.md", "docs/**"] });')).result as string);
-    for (const rule of ['Edit(./HANDOFF.md)', 'Write(./HANDOFF.md)', 'Edit(./docs/**)', 'Write(./docs/**)']) assert.ok(claude.settings.permissions.deny.includes(rule), rule);
+    // Absolute from its worktree's root: a relative rule on a bare name would also match one in a subfolder.
+    const launched = (await run('return { launch: JSON.parse(await agent("fixture:launch", { name: "guarded", backend: "claude", access: "edit", protect: ["HANDOFF.md", "docs/**"] })), worktree: await workspace("guarded") };')).result as any, claude = launched.launch;
+    const root = claudeRulePath(launched.worktree.path);
+    for (const rule of [`Edit(${root}/HANDOFF.md)`, `Write(${root}/HANDOFF.md)`, `Edit(${root}/docs/**)`, `Write(${root}/docs/**)`]) assert.ok(claude.settings.permissions.deny.includes(rule), rule);
     assert.match(claude.argv[claude.argv.indexOf('--append-system-prompt') + 1], /Do not change HANDOFF\.md, docs\/\*\*; when you finish, the hub puts any change to them back/);
     // A read-only tester with a shell gets the allowlisted commands, not plan mode; its worktree goes at its end, build output and all.
     const tested = await run(`
