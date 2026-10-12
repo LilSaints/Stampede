@@ -103,34 +103,42 @@ async function landed(repo: string, branch: string) {
  * The kept worktrees of finished runs, removed for the orchestrator
  * (workflow_control release). One with uncommitted changes, used by an active
  * run or that git refuses stays and says why; its branch always stays. With
- * `branches`, a removed worktree's branch whose work is in its checkout's
- * HEAD is deleted, and an unmerged one stays.
+ * `branches`, a released worktree's branch whose work is in its checkout's
+ * HEAD is deleted, and an unmerged one stays. Each worktree's record, in
+ * `runs` and in every finished run of `known` that shares it, says so:
+ * `kept: false` and `releasedAt`, then `branchDeletedAt`, stamped `at`.
  */
-export async function releaseWorktrees(runs: Run[], options: { branches?: boolean; active?: Run[] } = {}) {
+export async function releaseWorktrees(runs: Run[], options: { branches?: boolean; active?: Run[]; known?: Run[]; at?: string } = {}) {
   const removed: { runId: string; agent: string; branch?: string }[] = [], kept: { runId: string; agent: string; branch?: string; worktree?: string; reason: string }[] = [], branchesDeleted: string[] = [];
+  const at = options.at ?? new Date().toISOString();
   const inUse = new Map((options.active ?? []).flatMap(run => run.agents.filter(a => a.workspace.kind === 'worktree').map(a => [fold(a.workspace.path), run.id] as const)));
+  // A resumed run's cache hit shares its earlier run's worktree: each is released once, and every record of it is marked.
+  const records = (w: Workspace) => [...runs, ...options.known ?? []].flatMap(run => run.agents.map(a => a.workspace)).filter(r => r.kind === 'worktree' && fold(r.path) === fold(w.path));
   const seen = new Set<string>();
   for (const run of runs) for (const agent of run.agents) {
-    const w = agent.workspace, at = { runId: run.id, agent: agent.name, branch: w.branch };
-    // A resumed run's cache hit shares its earlier run's worktree: each is released once.
-    if (w.kind !== 'worktree' || !w.kept || seen.has(fold(w.path))) continue;
+    const w = agent.workspace, entry = { runId: run.id, agent: agent.name, branch: w.branch };
+    if (w.kind !== 'worktree' || !(w.kept || w.releasedAt) || seen.has(fold(w.path))) continue;
     seen.add(fold(w.path));
     const user = inUse.get(fold(w.path));
-    const refused = !ownWorktree(w) ? 'not a Stampede worktree' : user ? `used by active run ${user}` : await repoMutex(w.repo!).run(async () => {
+    // One released before still has a branch for deleteMergedBranches to look at.
+    const refused = w.releasedAt ? undefined : !ownWorktree(w) ? 'not a Stampede worktree' : user ? `used by active run ${user}` : await repoMutex(w.repo!).run(async () => {
       const info = await lstat(w.path).catch(() => undefined);
       if (info?.isSymbolicLink()) return 'a symbolic link';
       if (info && await git(w.path, ['status', '--porcelain'])) return 'uncommitted changes';
       // One already gone (gc, by hand) leaves only git's record of it.
-      if (info) { await removeWorktree(w.repo!, w.path); removed.push(at); } else await git(w.repo!, ['worktree', 'prune']);
+      if (info) { await removeWorktree(w.repo!, w.path); removed.push(entry); } else await git(w.repo!, ['worktree', 'prune']);
     }).catch(gitReason);
-    if (refused) { kept.push({ ...at, worktree: w.path, reason: refused }); continue; }
-    if (!options.branches) continue;
+    if (refused) { kept.push({ ...entry, worktree: w.path, reason: refused }); continue; }
+    if (!w.releasedAt) for (const record of records(w)) Object.assign(record, { kept: false, releasedAt: at });
+    if (!options.branches || w.branchDeletedAt) continue;
     const unmerged = await repoMutex(w.repo!).run(async () => {
-      if ((await capture('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`], w.repo!)).code !== 0) return;
-      if (!await landed(w.repo!, w.branch!)) return 'unmerged';
-      await git(w.repo!, ['branch', '-D', w.branch!]); branchesDeleted.push(w.branch!);
+      if ((await capture('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`], w.repo!)).code === 0) {
+        if (!await landed(w.repo!, w.branch!)) return 'unmerged';
+        await git(w.repo!, ['branch', '-D', w.branch!]); branchesDeleted.push(w.branch!);
+      }
+      for (const record of records(w)) record.branchDeletedAt = at;
     }).catch(gitReason);
-    if (unmerged) kept.push({ ...at, reason: unmerged });
+    if (unmerged) kept.push({ ...entry, reason: unmerged });
   }
   return { removed, kept, ...(options.branches ? { branchesDeleted } : {}) };
 }

@@ -23,7 +23,7 @@ import { type BackendInfo } from './capabilities.js';
 import { Scheduler, AdmissionError } from './scheduler.js';
 import { Locks } from './locks.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
-import { type Agent, type AgentOpts, type Checkpoint, type Run, agentTerminal, runTerminal, cancelledAgents } from './model.js';
+import { type Agent, type AgentOpts, type Checkpoint, type Run, agentTerminal, runTerminal, cancelledAgents, worktreeEffects } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
 import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, type Workspace, createWorkspace, finishWorkspace, git, repoRoot, resolveCommit } from './workspaces.js';
 
@@ -122,7 +122,7 @@ export class RunManager extends EventEmitter {
   }
   async event(run: Run, type: string, data: any = {}) {
     return this.eventMutex.run(async () => {
-      if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run) });
+      if (type === 'run.status' && runTerminal(data.status)) await this.store.write(path.join(this.store.runDir(run.id), 'result.json'), { status: run.status, result: run.result, error: run.error, cacheHits: run.cacheHits, liveCalls: run.liveCalls, ...run.cacheReport, effects: worktreeEffects(run), cancelledAgents: cancelledAgents(run) });
       const event = { hubSeq: ++this.hubSeq, runId: run.id, type, at: now(), data };
       if (type === 'run.status' && runTerminal(data.status) || type === 'message.accepted' && (data.to === 'orchestrator' || data.to === '*') && !['orchestrator', 'system'].includes(data.from) || ['team.deadlock', 'team.admission_blocked', 'backend.unavailable', 'budget.exhausted', 'agent.failed', 'agent.refused', 'agent.done', 'checkpoint.waiting'].includes(type)) run.notifications = [...run.notifications ?? [], event].slice(-200);
       await this.store.write(path.join(this.store.home, 'hub-seq.json'), { seq: this.hubSeq });
@@ -195,7 +195,15 @@ export class RunManager extends EventEmitter {
     const runs = ids.map(id => this.get(id));
     const open = runs.find(run => !runTerminal(run.status) || this.active.has(run.id));
     if (open) throw new Error(`run ${open.id} is not finished: release takes finished runs only`);
-    return releaseWorktrees(runs, { branches, active: [...this.active.values()].map(e => e.run) });
+    const at = now(), finished = [...this.runs.values()].filter(run => runTerminal(run.status) && !this.active.has(run.id));
+    const report = await releaseWorktrees(runs, { branches, active: [...this.active.values()].map(e => e.run), known: finished, at });
+    // Each run recording a worktree this released keeps what became of it: in run.json, and in result.json's effects.
+    for (const run of finished) if (run.agents.some(a => a.workspace.releasedAt === at || a.workspace.branchDeletedAt === at)) {
+      const directory = this.store.runDir(run.id), saved = await readJson<Record<string, unknown>>(path.join(directory, 'result.json'));
+      await this.store.write(path.join(directory, 'run.json'), run);
+      if (saved) await this.store.write(path.join(directory, 'result.json'), { ...saved, effects: worktreeEffects(run), cancelledAgents: cancelledAgents(run) });
+    }
+    return report;
   }
   async control(id: string, action: string) {
     if (!id) throw new Error(`${action} needs runId`);
@@ -289,7 +297,7 @@ export class RunExecution {
       await Promise.allSettled(this.childTasks);
       await this.cancellation;
       await Promise.allSettled([...this.teams.values()].map(team => team.admission));
-      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: this.run.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(this.run) });
+      await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'result.json'), { status: this.run.status, result: this.run.result, error: this.run.error, cacheHits: this.run.cacheHits, liveCalls: this.run.liveCalls, ...this.run.cacheReport, effects: worktreeEffects(this.run), cancelledAgents: cancelledAgents(this.run) });
       await this.manager.store.write(path.join(this.manager.store.runDir(this.run.id), 'run.json'), this.run);
       for (const c of this.contexts.values()) { c.token = ''; for (const file of ['mcp.json', 'settings.json']) await rm(path.join(this.agentDir(c.agent), file), { force: true }); }
     }
@@ -306,7 +314,7 @@ export class RunExecution {
     if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
     // An agent's worktree as the script needs it to continue that work: branch, commits and path.
     // A chain of baseRef agents lands as one change: rootBaseCommit..commit of its last agent.
-    if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name), w = a?.workspace; return w?.kind === 'worktree' ? { branch: w.branch ?? null, baseCommit: w.baseCommit ?? null, rootBaseCommit: w.rootBaseCommit ?? w.baseCommit ?? null, chain: w.chain ?? [a!.name], commit: w.commit ?? null, path: w.path, kept: w.kept ?? null } : null; }
+    if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name), w = a?.workspace; return w?.kind === 'worktree' ? { branch: w.branch ?? null, baseCommit: w.baseCommit ?? null, rootBaseCommit: w.rootBaseCommit ?? w.baseCommit ?? null, chain: w.chain ?? [a!.name], commit: w.commit ?? null, path: w.path, kept: w.kept ?? null, ...(w.releasedAt ? { releasedAt: w.releasedAt } : {}) } : null; }
     if (method === 'checkpoint') return this.checkpoint(params);
     if (method === 'log') { this.appendLog(params.message); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
@@ -591,7 +599,9 @@ export class RunExecution {
       if (c.cacheable && !c.agent.teamId) {
         const hit = await this.cache.lookup(c.key!, c.occ!);
         if (hit) {
-          c.cached = true; c.agent.result = hit.result; c.agent.workspace = this.lineage(c, hit.effects); c.agent.externalTools = hit.externalTools;
+          // A worktree released since the run it comes from finished is recorded as released here too.
+          const since = this.manager.runs.get(this.run.resumeOf!)?.agents.find(a => a.id === hit.agentId)?.workspace;
+          c.cached = true; c.agent.result = hit.result; c.agent.workspace = this.lineage(c, since?.releasedAt ? { ...hit.effects, kept: false, releasedAt: since.releasedAt } : hit.effects); c.agent.externalTools = hit.externalTools;
           if (hit.externalTools?.length) this.cache.cachedExternalTools.push({ label: c.agent.label, tools: hit.externalTools });
           this.run.cacheHits++; await this.finish(c, 'done'); return;
         }

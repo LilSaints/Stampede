@@ -10,8 +10,12 @@ const mutexes = new Map<string, Mutex>();
 export function repoMutex(cwd: string) { const key = process.platform === 'win32' ? cwd.toLowerCase() : cwd; if (!mutexes.has(key)) mutexes.set(key, new Mutex()); return mutexes.get(key)!; }
 export async function git(cwd: string, args: string[]) { const result = await capture('git', args, cwd); if (result.code !== 0) throw new Error(result.stderr.trim() || 'git failed'); return result.stdout.trim(); }
 export async function repoRoot(cwd: string) { try { return await git(cwd, ['rev-parse', '--show-toplevel']); } catch { return undefined; } }
-/** `rootBaseCommit` and `chain`: where a chain of baseRef agents began, and their names from its first agent to this one. */
-export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; rootBaseCommit?: string; chain?: string[]; commit?: string; kept?: boolean }
+/**
+ * `rootBaseCommit` and `chain`: where a chain of baseRef agents began, and their names from its first agent to this one.
+ * `releasedAt`: when workflow_control release removed the kept worktree (`kept` is then false; branch and commit stay);
+ * `branchDeletedAt`: when it deleted the branch, whose work was in the checkout's HEAD.
+ */
+export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; rootBaseCommit?: string; chain?: string[]; commit?: string; kept?: boolean; releasedAt?: string; branchDeletedAt?: string }
 /** A git ref's commit in the repository holding `cwd`; a worktree problem, not a backend's, when it has none. */
 export async function resolveCommit(cwd: string, ref: string) {
   const repo = await repoRoot(cwd);

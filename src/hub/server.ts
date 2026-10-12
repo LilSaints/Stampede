@@ -8,7 +8,7 @@ import { Security, type Identity } from './security.js';
 import { Store, readJson, readJournal } from './store.js';
 import { RunManager } from './runs.js';
 import { agentTranscript } from './transcript.js';
-import { type Agent, type Run, runTerminal, agentTerminal, cancelledAgents } from './model.js';
+import { type Agent, type Run, runTerminal, agentTerminal, cancelledAgents, worktreeEffects } from './model.js';
 import { cleanup } from './cleanup.js';
 import { probeBackends, type BackendInfo } from './capabilities.js';
 import { hash } from './workspaces.js';
@@ -160,7 +160,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       const resultPath = path.join(store.runDir(run!.id), 'result.json');
       // With select, only the values asked for; else the whole result, a long one as a preview beside its file.
       result = input.select ? { status: run!.status, ...selected(run!.result, input.select), ...(run!.error ? { error: run!.error } : {}), resultPath }
-        : { status: run!.status, result: capped(run!.result), error: run!.error, resultPath, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run!) };
+        : { status: run!.status, result: capped(run!.result), error: run!.error, resultPath, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: worktreeEffects(run!), cancelledAgents: cancelledAgents(run!) };
     }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';
