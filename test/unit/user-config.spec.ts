@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { checkPlugins, mcpServerEntries, resolveMcpServers, resolvePlugins, toCodex } from '../../src/backends/userConfig.js';
+import { checkPlugins, mcpServerEntries, mcpServerList, resolveMcpServers, resolvePlugins, toCodex } from '../../src/backends/userConfig.js';
 
 test('mcpServers is a list of names and { name: config } servers in Claude\'s shape', () => {
   assert.deepEqual(mcpServerEntries(['unreal', { web: { type: 'http', url: 'https://example.invalid' } }]), [['unreal', undefined], ['web', { type: 'http', url: 'https://example.invalid' }]]);
@@ -19,6 +19,20 @@ test('mcpServers is a list of names and { name: config } servers in Claude\'s sh
     [[{ a: { type: 'ws', url: 'https://x' } }], /type must be stdio, http or sse/],
     [[{ a: { command: 'x', args: [1] } }], /args must be a list of strings/],
     [[{ a: { command: 'x', env: { K: 1 } } }], /env must map names to strings/],
+  ] as const) assert.throws(() => mcpServerEntries(value), error, JSON.stringify(value));
+});
+test('mcpServers also takes one { name: config } map, the shape of .mcp.json and Claude settings', async () => {
+  const map = { a: { command: 'node', args: ['s.js'] }, web: { type: 'http', url: 'https://example.invalid' } };
+  assert.deepEqual(mcpServerList(map), [{ a: { command: 'node', args: ['s.js'] } }, { web: { type: 'http', url: 'https://example.invalid' } }]);
+  assert.deepEqual(mcpServerList(['a']), ['a'], 'a list stays as it is');
+  assert.deepEqual(mcpServerEntries(map), [['a', { command: 'node', args: ['s.js'] }], ['web', { type: 'http', url: 'https://example.invalid' }]]);
+  assert.deepEqual(await resolveMcpServers(map, 'claude', os.tmpdir(), {}), map);
+  assert.deepEqual(mcpServerEntries({}), []);
+  for (const [value, error] of [
+    [Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`s${i}`, { command: 'x' }])), /at most 20 servers/],
+    [{ a: 'unreal' }, /mcpServers.a must be an MCP server config/],
+    [{ stampede: { command: 'x' } }, /Stampede's own server/],
+    [{ a: { args: ['x'] } }, /a stdio server needs a command/],
   ] as const) assert.throws(() => mcpServerEntries(value), error, JSON.stringify(value));
 });
 test('a named server is found as Claude Code finds it: local scope, then the project\'s .mcp.json, then user scope', async () => {

@@ -22,6 +22,17 @@ const live = (a: Agent) => a.turns.at(-1)?.endedAt ? 0 : a.liveTokens ?? 0;
 /** An agent's result inline up to this many characters of JSON; past it, a preview and the file. */
 const AGENT_RESULT_CHARS = 20000;
 const truncate = (value: string, max: number) => value.length > max ? value.slice(0, max) + `…(+${value.length - max} chars)` : value;
+/** A run's result inline up to the same cap; past it, a preview (result.json holds the whole value). */
+const capped = (value: unknown) => { const text = JSON.stringify(value); return text !== undefined && text.length > AGENT_RESULT_CHARS ? truncate(text, AGENT_RESULT_CHARS) : value; };
+/** Only the values at `select`'s dotted paths into a run's result (`head.sha`, `items.0`), keyed by path, and the paths that name nothing. */
+function selected(value: unknown, paths: string[]) {
+  const found: Record<string, unknown> = {}, missing: string[] = [];
+  for (const dotted of paths) {
+    const at = dotted.split('.').reduce<any>((v, key) => v !== null && typeof v === 'object' && Object.hasOwn(v, key) ? v[key] : undefined, value);
+    if (at === undefined) missing.push(dotted); else found[dotted] = at;
+  }
+  return { result: capped(found), ...(missing.length ? { missing } : {}) };
+}
 export function summary(run: Run, session?: string) {
   return { runId: run.id, name: run.name, status: run.status, startedAt: run.startedAt, endedAt: run.endedAt, orchestratorSessionId: run.orchestratorSessionId,
     phases: run.phases.map(p => ({ ...p, counts: Object.fromEntries(['queued', 'running', 'waiting', 'idle', 'done', 'failed'].map(s => [s, run.agents.filter(a => a.phase === p.title && a.status === s).length])) })),
@@ -101,7 +112,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
     let result: any, observedSeq = manager.hubSeq;
     if (name === 'workflow_run') result = await manager.start(input);
     else if (name === 'workflow_resume') result = await manager.resume(input.runId, input);
-    else if (name === 'workflow_control') result = await manager.control(input.runId, input.action);
+    else if (name === 'workflow_control') result = input.action === 'release' ? await manager.release(input.runIds, input.deleteMergedBranches) : await manager.control(input.runId, input.action);
     else if (name === 'workflow_send') { if (!execution) throw new Error('run is terminal'); result = await execution.sendOrchestrator(input.to, input.text); }
     else if (name === 'workflow_answer') { if (!execution) throw new Error('run is terminal'); result = await execution.answerCheckpoint(input.name, input.answer); }
     else if (name === 'workflow_status' || name === 'workflow_wait') {
@@ -128,6 +139,7 @@ export async function startHub(options: { home: string; config: Config; cliEntry
       if (input.orchestratorSessionId && !ui) run!.logSeen ={ ...run!.logSeen, [input.orchestratorSessionId]: logTotal };
     } else if (name === 'workflow_result' && input.agent !== undefined) {
       // One agent's result, readable while the run goes on; a long one is read from its file.
+      if (input.select) throw new Error('select reads a finished run\'s result; it does not go with agent');
       const agent = run!.agents.find(a => a.name === input.agent); if (!agent) throw new Error('unknown agent');
       result = { agent: agent.name, status: agent.status, ...(agent.error ? { error: agent.error } : {}) };
       if (agent.result !== undefined) {
@@ -143,7 +155,13 @@ export async function startHub(options: { home: string; config: Config; cliEntry
           result = { ...result, ...(last.length > AGENT_RESULT_CHARS ? { lastAnswer: truncate(last, AGENT_RESULT_CHARS), lastAnswerPath } : { lastAnswer: last }) };
         }
       }
-    } else if (name === 'workflow_result') { if (!runTerminal(run!.status)) throw new Error('not_finished'); result = { status: run!.status, result: run!.result, error: run!.error, resultPath: path.join(store.runDir(run!.id), 'result.json'), cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run!) }; }
+    } else if (name === 'workflow_result') {
+      if (!runTerminal(run!.status)) throw new Error('not_finished');
+      const resultPath = path.join(store.runDir(run!.id), 'result.json');
+      // With select, only the values asked for; else the whole result, a long one as a preview beside its file.
+      result = input.select ? { status: run!.status, ...selected(run!.result, input.select), ...(run!.error ? { error: run!.error } : {}), resultPath }
+        : { status: run!.status, result: capped(run!.result), error: run!.error, resultPath, cacheHits: run!.cacheHits, liveCalls: run!.liveCalls, ...run!.cacheReport, effects: run!.agents.filter(a => a.workspace.kept).map(a => ({ name: a.name, ...a.workspace })), cancelledAgents: cancelledAgents(run!) };
+    }
     else if (name === 'workflow_messages') {
       const key = input.orchestratorSessionId ?? 'anonymous';
       const inbox = (await messages(run!)).filter(m => (m.to === 'orchestrator' || m.to === '*' && m.from !== 'orchestrator') && (input.unreadOnly === false || m.seq > (run!.readSeq[key] ?? 0))).slice(0, input.max ?? 20);

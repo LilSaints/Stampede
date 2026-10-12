@@ -8,7 +8,7 @@ import { defaults, loadConfig, settingsReport, validateConfig, VERSION, type Con
 import { capture, probeBackends } from './capabilities.js';
 import { Security } from './security.js';
 import { runTerminal, type Run } from './model.js';
-import { git, repoMutex, type Workspace } from './workspaces.js';
+import { git, removeWorktree, repoMutex, type Workspace } from './workspaces.js';
 
 export async function confirm(message: string, yes = false) {
   if (yes) return true;
@@ -86,6 +86,54 @@ export async function collectRuns(store: Store, config: Config, now = Date.now()
   }
   return collected;
 }
+const fold = (p: string) => process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+/** A kept worktree's metadata as Stampede writes it: a stampede/ branch, in its repository's .stampede/worktrees. */
+const ownWorktree = (w: Workspace) => Boolean(w.repo && w.branch?.startsWith('stampede/')) && path.resolve(w.path).startsWith(path.resolve(w.repo!, '.stampede', 'worktrees') + path.sep);
+const gitReason = (error: unknown) => (error as Error).message.split(/\r?\n/)[0]!.replace(/^fatal: /, '');
+/**
+ * Whether a branch's work is in the checkout's HEAD: its commits are, or
+ * merging it would change nothing (it was squash-merged or applied).
+ */
+async function landed(repo: string, branch: string) {
+  if ((await capture('git', ['merge-base', '--is-ancestor', branch, 'HEAD'], repo)).code === 0) return true;
+  const merged = await capture('git', ['merge-tree', '--write-tree', 'HEAD', branch], repo);
+  return merged.code === 0 && merged.stdout.split(/\r?\n/)[0] === await git(repo, ['rev-parse', 'HEAD^{tree}']);
+}
+/**
+ * The kept worktrees of finished runs, removed for the orchestrator
+ * (workflow_control release). One with uncommitted changes, used by an active
+ * run or that git refuses stays and says why; its branch always stays. With
+ * `branches`, a removed worktree's branch whose work is in its checkout's
+ * HEAD is deleted, and an unmerged one stays.
+ */
+export async function releaseWorktrees(runs: Run[], options: { branches?: boolean; active?: Run[] } = {}) {
+  const removed: { runId: string; agent: string; branch?: string }[] = [], kept: { runId: string; agent: string; branch?: string; worktree?: string; reason: string }[] = [], branchesDeleted: string[] = [];
+  const inUse = new Map((options.active ?? []).flatMap(run => run.agents.filter(a => a.workspace.kind === 'worktree').map(a => [fold(a.workspace.path), run.id] as const)));
+  const seen = new Set<string>();
+  for (const run of runs) for (const agent of run.agents) {
+    const w = agent.workspace, at = { runId: run.id, agent: agent.name, branch: w.branch };
+    // A resumed run's cache hit shares its earlier run's worktree: each is released once.
+    if (w.kind !== 'worktree' || !w.kept || seen.has(fold(w.path))) continue;
+    seen.add(fold(w.path));
+    const user = inUse.get(fold(w.path));
+    const refused = !ownWorktree(w) ? 'not a Stampede worktree' : user ? `used by active run ${user}` : await repoMutex(w.repo!).run(async () => {
+      const info = await lstat(w.path).catch(() => undefined);
+      if (info?.isSymbolicLink()) return 'a symbolic link';
+      if (info && await git(w.path, ['status', '--porcelain'])) return 'uncommitted changes';
+      // One already gone (gc, by hand) leaves only git's record of it.
+      if (info) { await removeWorktree(w.repo!, w.path); removed.push(at); } else await git(w.repo!, ['worktree', 'prune']);
+    }).catch(gitReason);
+    if (refused) { kept.push({ ...at, worktree: w.path, reason: refused }); continue; }
+    if (!options.branches) continue;
+    const unmerged = await repoMutex(w.repo!).run(async () => {
+      if ((await capture('git', ['rev-parse', '--verify', '--quiet', `refs/heads/${w.branch}`], w.repo!)).code !== 0) return;
+      if (!await landed(w.repo!, w.branch!)) return 'unmerged';
+      await git(w.repo!, ['branch', '-D', w.branch!]); branchesDeleted.push(w.branch!);
+    }).catch(gitReason);
+    if (unmerged) kept.push({ ...at, reason: unmerged });
+  }
+  return { removed, kept, ...(options.branches ? { branchesDeleted } : {}) };
+}
 export async function collectWorktrees(store: Store, yes = false) {
   const worktrees: Workspace[] = [];
   for (const id of await store.runs()) {
@@ -106,7 +154,7 @@ export async function collectWorktrees(store: Store, yes = false) {
     if (!await confirm('Remove this worktree? Its branch will be kept.', yes)) { kept.push(target); continue; }
     await repoMutex(workspace.repo).run(async () => {
       if (await git(target, ['status', '--porcelain'])) throw new Error('worktree has uncommitted changes; commit or move them before removal');
-      await git(workspace.repo!, ['worktree', 'remove', target]);
+      await removeWorktree(workspace.repo!, target);
     });
     removed.push(target);
   }

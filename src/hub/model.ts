@@ -24,7 +24,7 @@ export interface AgentOpts {
   locks?: string[];
   /** Claude only: the built-in tools the worker has (Claude's --tools), within what its access level allows; [] for none. MCP tools are not in it. */
   tools?: string[];
-  /** MCP servers the worker gets beside Stampede's: names from the backend's own config, or `{ name: config }` in Claude's shape. */
+  /** MCP servers the worker gets beside Stampede's: names from the backend's own config, or `{ name: config }` in Claude's shape. A script may pass one `{ name: config, … }` map instead, which validate makes this list. */
   mcpServers?: McpServerEntry[];
   /** Claude only: plugins turned on or off for this worker by id (name@marketplace), bare name, or `*` for every one the user has. */
   plugins?: Record<string, boolean>;

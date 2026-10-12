@@ -13,8 +13,9 @@ import { contract } from '../contract/prompts.js';
 import { agentTools } from '../mcp/tools.js';
 import { externalTools } from '../backends/tool-usage.js';
 import { findAgentFile, withTools } from '../backends/claudeAgents.js';
-import { checkPlugins, mcpServerEntries, resolveMcpServers, resolvePlugins } from '../backends/userConfig.js';
+import { checkPlugins, mcpServerEntries, mcpServerList, resolveMcpServers, resolvePlugins } from '../backends/userConfig.js';
 import { type CleanupRoot, cleanup, scratchFolders, within } from './cleanup.js';
+import { releaseWorktrees } from './maintenance.js';
 import { claudeContext, claudeReplies, claudeSessionExists, claudeTranscriptSize, claudeWindow, codexContext, codexThreadExists } from '../backends/context.js';
 import { Store, readJson, readJournal } from './store.js';
 import { type Config, lowerConfig } from './config.js';
@@ -24,7 +25,7 @@ import { Locks } from './locks.js';
 import { MessageBus, envelopes, type Peer } from './bus.js';
 import { type Agent, type AgentOpts, type Checkpoint, type Run, agentTerminal, runTerminal, cancelledAgents } from './model.js';
 import { RunCache, type TeamRecord } from './cache.js';
-import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, createWorkspace, finishWorkspace, git, repoRoot, resolveCommit } from './workspaces.js';
+import { Mutex, hash, canonical, fingerprint, invalidateFingerprint, type FingerprintMemo, type Workspace, createWorkspace, finishWorkspace, git, repoRoot, resolveCommit } from './workspaces.js';
 
 const now = () => new Date().toISOString();
 const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
@@ -188,7 +189,16 @@ export class RunManager extends EventEmitter {
     const args = input.argsPath !== undefined ? { argsPath: input.argsPath, ...(Object.hasOwn(input, 'args') ? { args: input.args } : {}) } : { args: Object.hasOwn(input, 'args') ? input.args : old.args };
     return this.start({ scriptPath: input.scriptPath ?? old.scriptPath, cwd: old.cwd, ...args, defaultBackend: old.defaultBackend, budgetTokens: old.budget.totalTokens ?? undefined, budgetUsd: old.budget.totalUsd ?? undefined, orchestratorSessionId: input.orchestratorSessionId ?? old.orchestratorSessionId, notifyAgents: old.notifyAgents, title: old.title, continueInterrupted: input.continueInterrupted }, id);
   }
+  /** workflow_control release: the kept worktrees of finished runs removed (releaseWorktrees), never one an active run uses. */
+  async release(ids: string[] | undefined, branches = false) {
+    if (!ids?.length) throw new Error('release needs runIds, the finished runs whose kept worktrees to remove');
+    const runs = ids.map(id => this.get(id));
+    const open = runs.find(run => !runTerminal(run.status) || this.active.has(run.id));
+    if (open) throw new Error(`run ${open.id} is not finished: release takes finished runs only`);
+    return releaseWorktrees(runs, { branches, active: [...this.active.values()].map(e => e.run) });
+  }
   async control(id: string, action: string) {
+    if (!id) throw new Error(`${action} needs runId`);
     const run = this.get(id), execution = this.active.get(id);
     if (!execution || runTerminal(run.status)) throw new Error('run is terminal');
     if (action === 'cancel') await execution.cancel();
@@ -229,6 +239,8 @@ export class RunExecution {
   /** checkpoint() calls waiting for an answer, oldest first per name, and how many each name has made. */
   private readonly checkpointWaiters = new Map<string, { record: Checkpoint; settle: (answer: unknown) => void }[]>();
   private readonly checkpointCounts = new Map<string, number>();
+  /** Whether the run log has said that a scratch folder is too deep: once a run, as every agent's would be alike. */
+  private deepScratchNoted = false;
   constructor(readonly manager: RunManager, readonly run: Run, readonly config: Config) {
     this.bus = new MessageBus(run.id, this.peers, { ...config.limits, claimLeaseMs: config.delivery.claimLeaseMs }, async (kind, value) => {
       await manager.store.append(path.join(manager.store.runDir(run.id), kind === 'board.posted' ? 'board.jsonl' : 'messages.jsonl'), { kind, value });
@@ -293,7 +305,8 @@ export class RunExecution {
     }
     if (method === 'phase') { const title = phase(params.title)!; if (!group) this.run.phase = title; if (!this.run.phases.some(p => p.title === title)) this.run.phases.push({ title }); await this.event('phase', { title }); return; }
     // An agent's worktree as the script needs it to continue that work: branch, commits and path.
-    if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name); return a?.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, baseCommit: a.workspace.baseCommit ?? null, commit: a.workspace.commit ?? null, path: a.workspace.path, kept: a.workspace.kept ?? null } : null; }
+    // A chain of baseRef agents lands as one change: rootBaseCommit..commit of its last agent.
+    if (method === 'workspace') { const a = this.run.agents.find(x => x.name === params.name), w = a?.workspace; return w?.kind === 'worktree' ? { branch: w.branch ?? null, baseCommit: w.baseCommit ?? null, rootBaseCommit: w.rootBaseCommit ?? w.baseCommit ?? null, chain: w.chain ?? [a!.name], commit: w.commit ?? null, path: w.path, kept: w.kept ?? null } : null; }
     if (method === 'checkpoint') return this.checkpoint(params);
     if (method === 'log') { this.appendLog(params.message); await this.event('log', params); return; }
     if (method === 'send' || method === 'team.send') return (await this.sendOrchestrator(params.to, params.text)).seq;
@@ -439,6 +452,8 @@ export class RunExecution {
       if (bad) throw new Error(`tools cannot include ${bad}: ${refused(bad)}`);
     }
     if (opts.mcpServers !== undefined) {
+      // A { name: config } map becomes the list once, here: configure and the cache key read the option as given.
+      opts.mcpServers = mcpServerList(opts.mcpServers) as AgentOpts['mcpServers'];
       mcpServerEntries(opts.mcpServers);
       if (backend === 'codex' && this.manager.backends.codex.capabilities.mcpViaFlags === false) throw new Error('mcpServers need MCP servers by flags, which this Codex CLI is not qualified for; run stampede doctor');
     }
@@ -576,7 +591,7 @@ export class RunExecution {
       if (c.cacheable && !c.agent.teamId) {
         const hit = await this.cache.lookup(c.key!, c.occ!);
         if (hit) {
-          c.cached = true; c.agent.result = hit.result; c.agent.workspace = hit.effects; c.agent.externalTools = hit.externalTools;
+          c.cached = true; c.agent.result = hit.result; c.agent.workspace = this.lineage(c, hit.effects); c.agent.externalTools = hit.externalTools;
           if (hit.externalTools?.length) this.cache.cachedExternalTools.push({ label: c.agent.label, tools: hit.externalTools });
           this.run.cacheHits++; await this.finish(c, 'done'); return;
         }
@@ -585,13 +600,13 @@ export class RunExecution {
       // An agent the resumed run lost mid-turn when the hub stopped continues its own session, in its own worktree.
       const prior = await this.interrupted(c);
       if (prior) {
-        c.agent.workspace = { ...prior.workspace }; c.agent.sessionId = prior.sessionId; c.agent.continues = { runId: this.run.resumeOf!, agentId: prior.id };
+        c.agent.workspace = this.lineage(c, { ...prior.workspace }); c.agent.sessionId = prior.sessionId; c.agent.continues = { runId: this.run.resumeOf!, agentId: prior.id };
         await this.note(`${c.agent.name}: continuing its interrupted session${prior.workspace.kind === 'worktree' ? ' and worktree' : ''} from ${this.run.resumeOf}`);
         await this.configure(c); this.run.liveCalls++;
         await this.turn(c, CONTINUE_PROMPT, true);
         return;
       }
-      if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name, c.base).catch(error => { throw Object.assign(error, { kind: 'workspace' }); }); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
+      if (c.agent.workspace.kind === 'worktree') { c.agent.workspace = this.lineage(c, await createWorkspace(c.agent.workspace.path, this.run.id, c.agent.name, c.base).catch(error => { throw Object.assign(error, { kind: 'workspace' }); })); await this.event('worktree.created', { name: c.agent.name, workspace: c.agent.workspace }); }
       await this.configure(c);
       this.run.liveCalls++;
       await this.turn(c, c.prompt, false);
@@ -603,6 +618,16 @@ export class RunExecution {
     } finally {
       if (agentTerminal(c.agent.status)) { c.release?.(c.agent.id); c.release = undefined; }
     }
+  }
+  /**
+   * A worktree with where its chain of baseRef agents began: an agent started
+   * from another's worktree (`baseRef: { agent }`) takes that one's root base
+   * and chain; any other is a chain of its own, from its own base.
+   */
+  private lineage(c: AgentContext, workspace: Workspace): Workspace {
+    if (workspace.kind !== 'worktree') return workspace;
+    const ref = c.opts.baseRef, from = typeof ref === 'object' ? this.run.agents.find(a => a.name === ref.agent)?.workspace : undefined;
+    return { ...workspace, rootBaseCommit: from ? from.rootBaseCommit ?? from.baseCommit : workspace.baseCommit, chain: [...(from ? from.chain ?? [(ref as { agent: string }).agent] : []), c.agent.name] };
   }
   /**
    * The agent of the resumed run that this call is (same key and occurrence),
@@ -635,9 +660,9 @@ export class RunExecution {
       writableDirs = c.scratch.filter(folder => within(folder, a.workspace.path) === 'outside');
       for (const folder of writableDirs) await mkdir(folder, { recursive: true });
     } catch (error) { throw Object.assign(error as Error, { kind: 'workspace' }); }
-    // Windows tools often stop at 260 characters, and a deep scratch folder leaves little of that to its content.
+    // Windows tools often stop at 260 characters, and a deep scratch folder leaves little of that to its content; said once a run.
     const deep = process.platform === 'win32' ? c.scratch.filter(folder => folder.length > SCRATCH_PATH_WARN) : [];
-    if (deep.length) await this.note(`${a.name}: scratch folder ${deep.join(', ')} is over ${SCRATCH_PATH_WARN} characters; keep tool and test-harness data in the worktree, where paths stay short`);
+    if (deep.length && !this.deepScratchNoted) { this.deepScratchNoted = true; await this.note(`${a.name}: scratch folder ${deep.join(', ')} is over ${SCRATCH_PATH_WARN} characters; keep tool and test-harness data in the worktree, where paths stay short (noted once a run)`); }
     c.cleanupRoots = a.access === 'read-only' ? [] : [...(a.workspace.kind === 'worktree' ? [{ path: a.workspace.path, allowRoot: false }] : []), ...c.scratch.map(folder => ({ path: folder, allowRoot: true }))];
     const mcpReady = a.backend === 'claude' || backend.capabilities.mcpViaFlags !== false;
     const cleanupTool = c.cleanupRoots.length > 0 && mcpReady;
@@ -837,7 +862,7 @@ export class RunExecution {
       if (removed.length || failed.length) await this.note(`${c.agent.name}: removed ${removed.length} scratch folder${removed.length === 1 ? '' : 's'}${failed.length ? `; kept ${failed.map(r => `${r.path} (${r.reason})`).join(', ')}` : ''}`);
     }
     if (!c.cached) {
-      c.agent.workspace = await finishWorkspace(c.agent.workspace, c.agent.name, status === 'done' && c.agent.access === 'edit');
+      c.agent.workspace = await finishWorkspace(c.agent.workspace, c.agent.name, status === 'done' && c.agent.access === 'edit', message => this.note(message));
       if (c.agent.workspace.kind === 'worktree' && c.agent.workspace.repo) await this.event(c.agent.workspace.kept ? 'worktree.kept' : 'worktree.removed', { name: c.agent.name, workspace: c.agent.workspace });
     }
     await this.status(c, status); await this.bus.terminate(c.agent.name); c.release?.(c.agent.id); c.release = undefined;

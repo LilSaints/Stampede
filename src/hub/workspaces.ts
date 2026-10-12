@@ -1,4 +1,4 @@
-import { mkdir, readFile, appendFile, readdir, stat, lstat } from 'node:fs/promises';
+import { mkdir, readFile, appendFile, readdir, stat, lstat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { capture } from './capabilities.js';
@@ -10,7 +10,8 @@ const mutexes = new Map<string, Mutex>();
 export function repoMutex(cwd: string) { const key = process.platform === 'win32' ? cwd.toLowerCase() : cwd; if (!mutexes.has(key)) mutexes.set(key, new Mutex()); return mutexes.get(key)!; }
 export async function git(cwd: string, args: string[]) { const result = await capture('git', args, cwd); if (result.code !== 0) throw new Error(result.stderr.trim() || 'git failed'); return result.stdout.trim(); }
 export async function repoRoot(cwd: string) { try { return await git(cwd, ['rev-parse', '--show-toplevel']); } catch { return undefined; } }
-export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; commit?: string; kept?: boolean }
+/** `rootBaseCommit` and `chain`: where a chain of baseRef agents began, and their names from its first agent to this one. */
+export interface Workspace { kind: 'shared' | 'worktree'; path: string; repo?: string; branch?: string; baseCommit?: string; rootBaseCommit?: string; chain?: string[]; commit?: string; kept?: boolean }
 /** A git ref's commit in the repository holding `cwd`; a worktree problem, not a backend's, when it has none. */
 export async function resolveCommit(cwd: string, ref: string) {
   const repo = await repoRoot(cwd);
@@ -37,7 +38,23 @@ export async function createWorkspace(cwd: string, runId: string, name: string, 
     return { kind: 'worktree', path: location, repo, branch, baseCommit };
   });
 }
-export async function finishWorkspace(workspace: Workspace, name: string, snapshot: boolean) {
+/**
+ * Removes a clean worktree. A path past Windows' 260 characters needs
+ * core.longpaths, and a file another process still holds may be let go: it
+ * retries, then deletes the folder and prunes git's record of it. A worktree
+ * git refuses (locked, changed, with submodules) is never deleted.
+ */
+export async function removeWorktree(repo: string, target: string) {
+  let failure!: Error;
+  for (const wait of [0, 250, 1000]) {
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    try { await git(repo, ['-c', 'core.longpaths=true', 'worktree', 'remove', target]); return; } catch (error) { failure = error as Error; }
+    if (/locked|--force|-f -f|submodule/i.test(failure.message)) throw failure;
+  }
+  await rm(target, { recursive: true, force: true, maxRetries: 3 }).catch(() => { throw failure; });
+  await git(repo, ['worktree', 'prune']);
+}
+export async function finishWorkspace(workspace: Workspace, name: string, snapshot: boolean, note?: (message: string) => Promise<void>) {
   if (workspace.kind !== 'worktree' || !workspace.repo) return workspace;
   return repoMutex(workspace.repo).run(async () => {
     let dirty = await git(workspace.path, ['status', '--porcelain']);
@@ -50,7 +67,13 @@ export async function finishWorkspace(workspace: Workspace, name: string, snapsh
     workspace.kept = Boolean(dirty) || workspace.commit !== workspace.baseCommit;
     // An unkept branch holds nothing past its base; a base from another agent's
     // branch (baseRef) is not merged into the checkout, so -d would refuse it.
-    if (!workspace.kept) { await git(workspace.repo!, ['worktree', 'remove', workspace.path]); await git(workspace.repo!, ['branch', '-D', workspace.branch!]); }
+    // One git cannot remove is kept, and the run log says why: the agent's work is done all the same.
+    const reason = (error: unknown) => (error as Error).message.split(/\r?\n/)[0]!.replace(/^fatal: /, '');
+    if (!workspace.kept) {
+      try { await removeWorktree(workspace.repo!, workspace.path); }
+      catch (error) { workspace.kept = true; await note?.(`${name}: kept its worktree ${workspace.path}, which git could not remove (${reason(error)}); workflow_control release removes it later`); return workspace; }
+      await git(workspace.repo!, ['branch', '-D', workspace.branch!]).catch(error => note?.(`${name}: kept branch ${workspace.branch}, which git could not delete (${reason(error)})`));
+    }
     return workspace;
   });
 }

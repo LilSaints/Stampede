@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { startHub } from '../../src/hub/server.js';
@@ -53,5 +53,14 @@ test('status preserves the orchestrator inbox, idle blockers and durable undeliv
     const verbose = await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'reader', verbose: true });
     assert.deepEqual(verbose.log.slice(0, 2), ['one', 'two']); assert.match(verbose.notCacheable[0].reason, /cache disabled/);
     assert.deepEqual((await call('workflow_status', { runId: logged.runId, orchestratorSessionId: 'other' })).log.slice(0, 2), ['one', 'two']);
+    // workflow_result gives only the values select names; a run's result over the cap comes as a preview beside its file.
+    const big = await call('workflow_run', { cwd, script: 'export const meta={name:"result fixture",description:"result"}; return { verdict: "ship", head: { sha: "abc123" }, open: ["x", "y"], detail: "d".repeat(30000) };' });
+    await hub.manager.active.get(big.runId)?.task;
+    const picked = await call('workflow_result', { runId: big.runId, select: ['verdict', 'head.sha', 'open.1', 'missing.path'] });
+    assert.deepEqual(picked, { status: 'completed', result: { verdict: 'ship', 'head.sha': 'abc123', 'open.1': 'y' }, missing: ['missing.path'], resultPath: path.join(root, 'state', 'runs', big.runId, 'result.json') });
+    const whole = await call('workflow_result', { runId: big.runId });
+    assert.equal(typeof whole.result, 'string'); assert.match(whole.result, /^\{"verdict":"ship".*…\(\+\d+ chars\)$/s); assert.ok(whole.result.length < 20100);
+    assert.equal(JSON.parse(await readFile(whole.resultPath, 'utf8')).result.detail.length, 30000);
+    assert.equal((await call('workflow_result', { runId: logged.runId })).result, hub.manager.get(logged.runId).result, 'a short result comes whole');
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
 });
