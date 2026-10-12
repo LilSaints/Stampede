@@ -43,6 +43,10 @@ test('a call chooses its worker\'s built-in tools, MCP servers and plugins', { t
     assert.deepEqual(settings.enabledPlugins, { 'unreal-tools@market': true, 'docs@market': false, 'stampede@stampede': false });
     assert.ok(lean.log.includes('lean: Claude Code has no tool named Bogus, so the worker runs without it'), lean.log.join('\n'));
     assert.ok(lean.log.includes('lean: MCP server broken is failed, so the worker runs without its tools'));
+    // Servers given as one { name: config } map, as .mcp.json holds them, launch as the list form does.
+    const mapped = JSON.parse((await run('{ name: "mapped", backend: "claude", mcpServers: { a: { command: "node", args: ["s.js"] } } }')).result as string);
+    assert.deepEqual(mapped.mcp.mcpServers, { a: { command: 'node', args: ['s.js'] } });
+    assert.ok(mapped.argv.slice(mapped.argv.indexOf('--allowedTools') + 1).includes('mcp__a__*'));
     // A worker without the options keeps today's launch: no tool list, no servers, only Stampede's plugin off.
     const plain = JSON.parse((await run('{ name: "plain", backend: "claude" }')).result as string);
     assert.ok(!plain.argv.includes('--tools')); assert.deepEqual(plain.mcp.mcpServers, {}); assert.deepEqual(plain.settings.enabledPlugins, { 'stampede@stampede': false });

@@ -23,4 +23,6 @@ test('every worker learns it may be steered; a comms worker messages the orchest
   const plain = contract({ ...base, comms: false, cleanup: true, scratch: ['C:/tmp/fixtures'] });
   assert.match(plain, /orchestrator may steer you mid-task/); assert.match(plain, /cleanup tool.*scratch folders: C:\/tmp\/fixtures/); assert.doesNotMatch(plain, /progress reports/);
   assert.match(contract({ ...base, comms: true }), /Message the orchestrator only when something is wrong or you need a decision or clarification; never send it progress reports/);
+  // mark_done ends a member for good, so one told to stay available for follow-ups is not ordered to call it.
+  assert.match(contract({ ...base, comms: true, team: true }), /Call mark_done when coordination is complete, unless your task says to stay available for follow-ups \(mark_done ends you for good\)/);
 });

@@ -24,7 +24,7 @@ export interface AgentOpts {
   locks?: string[];
   /** Claude only: the built-in tools the worker has (Claude's --tools), within what its access level allows; [] for none. MCP tools are not in it. */
   tools?: string[];
-  /** MCP servers the worker gets beside Stampede's: names from the backend's own config, or `{ name: config }` in Claude's shape. */
+  /** MCP servers the worker gets beside Stampede's: names from the backend's own config, or `{ name: config }` in Claude's shape. A script may pass one `{ name: config, … }` map instead, which validate makes this list. */
   mcpServers?: McpServerEntry[];
   /** Claude only: plugins turned on or off for this worker by id (name@marketplace), bare name, or `*` for every one the user has. */
   plugins?: Record<string, boolean>;
@@ -73,4 +73,6 @@ export interface Run {
 /** A script's `checkpoint(name, data)`: it waits for the orchestrator's answer (workflow_answer), its timeout, or a replay from the run it resumes. */
 export interface Checkpoint { name: string; occ: number; data: unknown; status: 'waiting' | 'answered' | 'timed_out'; askedAt: string; timeoutMs: number; answeredAt?: string; answer?: unknown; replayedFrom?: string }
 /** Each cancelled agent of a run and, for one with a worktree, where its work is: branch, commit and path. */
-export const cancelledAgents = (run: Run) => run.agents.filter(a => a.status === 'cancelled').map(a => ({ name: a.name, ...(a.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, commit: a.workspace.commit ?? null, worktree: a.workspace.path, kept: a.workspace.kept ?? null } : {}) }));
+export const cancelledAgents = (run: Run) => run.agents.filter(a => a.status === 'cancelled').map(a => ({ name: a.name, ...(a.workspace.kind === 'worktree' ? { branch: a.workspace.branch ?? null, commit: a.workspace.commit ?? null, worktree: a.workspace.path, kept: a.workspace.kept ?? null, ...(a.workspace.releasedAt ? { releasedAt: a.workspace.releasedAt } : {}) } : {}) }));
+/** A run's effects: each worktree it kept, and each one since released, whose branch and commit still hold its work. */
+export const worktreeEffects = (run: Run) => run.agents.filter(a => a.workspace.kept || a.workspace.releasedAt).map(a => ({ name: a.name, ...a.workspace }));

@@ -118,6 +118,12 @@ test('the orchestrator steers workers without comms, answers checkpoints, passes
     await hub.manager.active.get(goneRun.runId)?.task;
     assert.equal(hub.manager.get(goneRun.runId).result, 'removed');
     assert.ok(!hub.manager.get(goneRun.runId).log.some(line => line.startsWith('gone: removed')), 'nothing to remove, so no line');
+    // A scratch folder over 100 characters is noted once a run (on Windows), however many agents use one.
+    const deepRoot = path.join(root, 'd'.repeat(Math.max(1, 101 - root.length)));
+    const deepRun = await hub.manager.start({ cwd, script: meta + `return await parallel(["a", "b", "c"].map(n => () => agent("fixture:argv", { name: "deep-" + n, backend: "codex", access: "edit", isolation: "shared", scratch: [${JSON.stringify(deepRoot)} + "/" + n] })));` });
+    await hub.manager.active.get(deepRun.runId)?.task;
+    assert.equal(hub.manager.get(deepRun.runId).status, 'completed');
+    assert.equal(hub.manager.get(deepRun.runId).log.filter(line => / is over 100 characters/.test(line)).length, process.platform === 'win32' ? 1 : 0, hub.manager.get(deepRun.runId).log.join('\n'));
     // A worker takes a hub-wide lock its call names, waits behind another holder, and the hub takes it back when its turn ends.
     const lockScript = meta + 'return await agent("fixture:lock:desktop-ui", { name: "prober", backend: "claude", locks: ["desktop-ui"] });';
     assert.equal(await hub.manager.locks.acquire('desktop-ui', { id: 'other', label: 'other-agent (run_x)' }, 0), true);

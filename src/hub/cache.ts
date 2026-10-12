@@ -35,7 +35,8 @@ export class RunCache {
     return record;
   }
   private async verify(effects: Workspace) {
-    if (effects.kind === 'worktree' && effects.kept) {
+    // A released worktree's branch still holds the work: it is checked as a kept one's is.
+    if (effects.kind === 'worktree' && (effects.kept || effects.releasedAt)) {
       try { if (await git(effects.repo!, ['rev-parse', effects.branch!]) !== effects.commit) throw new Error('branch changed'); }
       catch { this.verificationFailures.push(`${effects.branch}: branch no longer at cached commit`); return false; }
     }

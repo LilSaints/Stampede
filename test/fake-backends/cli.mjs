@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 let prompt = '';
 for await (const chunk of process.stdin) prompt += chunk;
 const argv = process.argv.slice(2);
@@ -14,6 +15,9 @@ if (prompt === 'auth') { emit({ type: 'turn.failed', error: { message: '401 auth
 if (prompt === 'rate-limit') { emit({ type: 'turn.failed', error: { message: '429 rate limit fixture' } }); process.exit(1); }
 if (prompt === 'hang') await new Promise(() => { setInterval(() => {}, 1000); });
 if (prompt === 'fixture:edit') await writeFile('fixture-output.txt', 'verified fixture edit\n');
+// A file of its own, so each agent of a chain adds a change; and a worktree locked, which git then refuses to remove.
+if (prompt.startsWith('fixture:write:')) await writeFile(prompt.slice('fixture:write:'.length), 'written by fixture\n');
+if (prompt === 'fixture:lock-worktree') execFileSync('git', ['worktree', 'lock', '--reason', 'fixture', process.cwd()], { windowsHide: true });
 if (/^fixture:recovery:[ab]$/.test(prompt)) {
   await mkdir('.stampede', { recursive: true });
   const marker = `.stampede/recovery-${prompt.at(-1)}.json`;

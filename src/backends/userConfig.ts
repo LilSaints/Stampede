@@ -33,9 +33,12 @@ function checkServer(name: string, c: unknown): asserts c is McpServer {
   if (c.args !== undefined && (!Array.isArray(c.args) || c.args.some(arg => typeof arg !== 'string'))) throw new Error(`mcpServers.${name}.args must be a list of strings`);
   for (const key of ['env', 'headers']) if (c[key] !== undefined && !stringMap(c[key])) throw new Error(`mcpServers.${name}.${key} must map names to strings`);
 }
-/** The call's `mcpServers` as [name, inline config or undefined for a name to look up]; throws on a malformed list. */
-export function mcpServerEntries(value: unknown): [string, McpServer | undefined][] {
-  if (!Array.isArray(value) || value.length > 20) throw new Error('mcpServers must be a list of at most 20 server names or { name: config } objects');
+/** A `{ name: config }` map, the shape of `.mcp.json` and Claude settings, as the list `mcpServers` takes: one `{ name: config }` per server. */
+export const mcpServerList = (value: unknown) => isMap(value) ? Object.entries(value).map(([name, config]) => ({ [name]: config })) : value;
+/** The call's `mcpServers` as [name, inline config or undefined for a name to look up]; throws on a malformed list or map. */
+export function mcpServerEntries(input: unknown): [string, McpServer | undefined][] {
+  const value = mcpServerList(input);
+  if (!Array.isArray(value) || value.length > 20) throw new Error('mcpServers must be a list of at most 20 server names or { name: config } objects, or one { name: config, … } map of at most 20 servers');
   if (JSON.stringify(value).length > 65536) throw new Error('mcpServers must be at most 64 KiB of JSON');
   const entries = value.map((entry): [string, McpServer | undefined] => {
     if (typeof entry === 'string') return [entry, undefined];
