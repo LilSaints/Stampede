@@ -39,6 +39,8 @@ export interface Agent {
   model?: string; effort?: string; context?: { tokens: number; window?: number };
   /** The call's cache key and occurrence, by which a resumed run finds this agent again. */
   callKey?: string; callOcc?: number;
+  /** Hashes of what the call key is made of (call, base, reads, args, workspace, backend version, settings), so a resumed run can say which changed. */
+  callParts?: Record<string, string>;
   /** The interrupted agent of an earlier run whose session (and worktree) this one continued instead of starting again. */
   continues?: { runId: string; agentId: string };
   /** Tokens the turn in flight has spent so far, counted as `usage` counts them; `usage` takes them over when it ends. */
@@ -63,7 +65,7 @@ export interface Run {
   logCount?: number; logSeen?: Record<string, number>;
   phase?: string; defaultBackend: 'claude' | 'codex'; seenSeq: Record<string, number>; readSeq: Record<string, number>;
   cacheHits: number; liveCalls: number;
-  cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[] };
+  cacheReport?: { notCacheable: { label: string; reason: string }[]; verificationFailures: string[]; cachedExternalTools?: { label: string; tools: string[] }[]; misses?: { label: string; reason: string }[] };
   notifications?: { hubSeq: number; runId: string; type: string; at: string; data: any }[];
   /** The script's checkpoint() calls, in order: what each asked and how it was answered. */
   checkpoints?: Checkpoint[];

@@ -7,7 +7,11 @@ import { VERSION } from '../hub/config.js';
 
 export async function startShim(home: string, entry: string, role: 'agent' | 'orchestrator') {
   const client = new HubClient(home, entry, role);
-  await client.connect();
+  // A hub this shim cannot use (another version, or none that starts) is said by
+  // each tool call, which tries it again: a server that never answers shows only
+  // as "Connection closed".
+  const connect = () => client.connect().then(() => undefined, (error: Error) => error);
+  let unusable = await connect();
   const claims = new Map<string | number, string>();
   class AcknowledgedTransport extends StdioServerTransport {
     override async send(message: JSONRPCMessage) {
@@ -26,6 +30,7 @@ export async function startShim(home: string, entry: string, role: 'agent' | 'or
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: role === 'agent' ? agentTools.filter(tool => !allowed || allowed.includes(tool.name)) : orchestratorTools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
+      if (unusable && (unusable = await connect())) throw Object.assign(new Error(unusable.message), { code: unusable.message.startsWith('blocked:') ? 'version_mismatch' : 'hub_unavailable' });
       const input = request.params.arguments ?? {}; validateTool(request.params.name, input, role);
       if (role === 'orchestrator' && request.params.name === 'workflow_run' && !input.cwd) input.cwd = process.cwd();
       const result = await client.tool(request.params.name, input);

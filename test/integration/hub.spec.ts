@@ -248,6 +248,34 @@ test('on Windows a hub the shim starts is created outside the shim\'s process tr
     await rm(root, { recursive: true, force: true, maxRetries: 5 });
   }
 });
+test('a shim that a hub of another version refuses still serves its tools, and each call says why', { timeout: 60000 }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-mismatch-'));
+  const home = path.join(root, 'state'); await mkdir(home, { recursive: true });
+  const { createServer } = await import('node:http');
+  const older = createServer((_request, response) => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ ok: true, version: '0.0.1' })); });
+  await new Promise<void>(resolve => older.listen(0, '127.0.0.1', resolve));
+  await writeFile(path.join(home, 'hub.json'), JSON.stringify({ pid: 1, port: (older.address() as any).port, version: '0.0.1' }));
+  await writeFile(path.join(home, 'hub.token'), 'older-token');
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([name, value]) => value !== undefined && !name.startsWith('STAMPEDE_'))) as Record<string, string>, STAMPEDE_HOME: home };
+  const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'mismatch-fixture', version: '1' });
+  try {
+    const transport = new StdioClientTransport({ command: process.execPath, args: [path.resolve('dist/cli.js'), 'mcp', '--role', 'orchestrator'], env, stderr: 'pipe' });
+    transport.stderr?.on('data', () => {});
+    await client.connect(transport);
+    assert.ok((await client.listTools()).tools.some(tool => tool.name === 'workflow_run'));
+    const called = await client.callTool({ name: 'workflow_list', arguments: {} });
+    assert.equal(called.isError, true);
+    const error = JSON.parse((called.content as { type: string; text: string }[])[0]!.text);
+    assert.equal(error.code, 'version_mismatch');
+    assert.match(error.error, /^blocked: hub version 0\.0\.1, shim version .+hub --restart --detach.+\/reload-plugins/);
+  } finally {
+    await client.close().catch(() => {});
+    await new Promise(resolve => older.close(resolve));
+    await rm(root, { recursive: true, force: true, maxRetries: 5 });
+  }
+});
 test('a stopped older hub\'s descriptor does not block starting a hub; a live hub of another version still does', { timeout: 60000 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'stampede-stale-'));
   const home = path.join(root, 'state'); await mkdir(home, { recursive: true });

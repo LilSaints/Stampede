@@ -77,6 +77,28 @@ test('resume verifies files, explicit inputs, kept branches, edit effects and bo
       assert.equal(hit.cacheHits, 1); assert.equal(hit.liveCalls, 0);
       assert.deepEqual(hit.cacheReport?.cachedExternalTools, [{ label: external.agents[0].label, tools: ['WebSearch', 'mcp__research__lookup'] }]);
     }
+
+    // A resumed run says why an agent it finished starts again.
+    assert.match(changedPrompt.log.join('\n'), /codex-2: not replayed from run_\w+: changed: its prompt or options/);
+    assert.deepEqual(changedPrompt.cacheReport?.misses?.map(m => m.label), ['codex-2']);
+    // A worktree agent started from a given commit replays after other work lands on the checkout; one keyed by the checkout's commit starts again.
+    const head = await git(cwd, ['rev-parse', 'HEAD']);
+    const based = await start(`return await agent("fixture:edit",{access:"edit",isolation:"worktree",baseRef:"${head}"});`);
+    const floating = await start('return await agent("fixture:edit",{access:"edit",isolation:"worktree"});');
+    await git(cwd, ['-c', 'core.hooksPath=', 'commit', '--allow-empty', '-m', 'land other work']);
+    assert.equal((await resume(based.id)).cacheHits, 1);
+    const relaunched = await resume(floating.id); assert.equal(relaunched.cacheHits, 0);
+    assert.match(relaunched.log.join('\n'), /not replayed from run_\w+: changed: the checkout's commit/);
+    // A reviewer's call holds the commits of the worktrees it reads: a writer that ends elsewhere sends it again rather than replay a review of other code.
+    const reviewed = await start('await agent("fixture:edit",{name:"writer",access:"edit",isolation:"worktree"}); return await agent("review",{name:"reader",readWorktrees:["writer"]});');
+    assert.equal((await resume(reviewed.id)).cacheHits, 2);
+    await git(reviewed.agents[0].workspace.path, ['-c', 'core.hooksPath=', 'commit', '--allow-empty', '-m', 'advance writer']);
+    // The writer's new snapshot commit differs from its first even within the same second.
+    process.env.GIT_AUTHOR_DATE = process.env.GIT_COMMITTER_DATE = '2001-01-01T00:00:00Z';
+    try {
+      const rewritten = await resume(reviewed.id); assert.equal(rewritten.cacheHits, 0);
+      assert.match(rewritten.log.join('\n'), /reader: not replayed from run_\w+: changed: a worktree it reads/);
+    } finally { delete process.env.GIT_AUTHOR_DATE; delete process.env.GIT_COMMITTER_DATE; }
   } finally { await hub.close(); await rm(root, { recursive: true, force: true }); }
 });
 

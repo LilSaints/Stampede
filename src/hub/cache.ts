@@ -11,6 +11,8 @@ export class RunCache {
   readonly verificationFailures: string[] = [];
   readonly notCacheable: { label: string; reason: string }[] = [];
   readonly cachedExternalTools: { label: string; tools: string[] }[] = [];
+  /** Agents the resumed run finished that start again, and why. */
+  readonly misses: { label: string; reason: string }[] = [];
   async load(runDirectory: string) {
     for (const record of await readJournal<CallRecord>(path.join(runDirectory, 'journal.jsonl'))) if (record.key) this.records.set(`${record.key}:${record.occ}`, record);
     for (const record of await readJournal<TeamRecord>(path.join(runDirectory, 'teams.jsonl'))) if (record.teamKey) this.teams.set(`${record.teamKey}:${record.occ}`, record);
@@ -20,6 +22,11 @@ export class RunCache {
     const record = this.records.get(`${key}:${occ}`);
     if (!record || record.status !== 'done' || !record.cacheable || record.tainted) return undefined;
     return await this.verify(record.effects) ? record : undefined;
+  }
+  /** Why a lookup of a call whose key is unchanged found nothing to replay. */
+  missReason(key: string, occ: number) {
+    const record = this.records.get(`${key}:${occ}`);
+    return !record ? 'its result was not recorded there' : record.status !== 'done' ? `it ended ${record.status} there` : record.tainted ? 'messages or shared tools fed into it there, so its result rests on more than its call' : !record.cacheable ? 'it was not cacheable there' : 'its branch is no longer at the commit it finished at';
   }
   async lookupTeam(key: string, occ: number) {
     const record = this.teams.get(`${key}:${occ}`);

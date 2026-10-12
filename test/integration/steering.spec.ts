@@ -66,6 +66,14 @@ test('the orchestrator steers workers without comms, answers checkpoints, passes
     const replayRun = hub.manager.active.get(replay.runId)!; await replayRun.task;
     assert.deepEqual(replayRun.run.result, { scope: { include: ['a.ts'] }, late: 'fallback' });
     assert.equal(replayRun.run.checkpoints![0]!.replayedFrom, asked.runId);
+    // Data too long for the wake keeps its keys and summary there, so the wake still reads it; workflow_status has all of it.
+    const big = await hub.manager.start({ cwd, script: meta + 'return await checkpoint("big", { summary: "B9 is ready to land", findings: "x".repeat(3000) });' });
+    const bigRun = hub.manager.active.get(big.runId)!;
+    await until(() => Boolean(bigRun.run.notifications?.some(n => n.type === 'checkpoint.waiting')), 'the long checkpoint');
+    assert.deepEqual(bigRun.run.notifications!.find(n => n.type === 'checkpoint.waiting')!.data.data, { summary: 'B9 is ready to land', findings: '…' });
+    assert.equal((await orch('workflow_status', { runId: big.runId })).value.checkpoints[0].data.findings.length, 3000);
+    assert.ok((await orch('workflow_answer', { runId: big.runId, name: 'big', answer: 'land' })).ok);
+    await bigRun.task; assert.equal(bigRun.run.result, 'land');
 
     // Args come from a file as well as inline, never both.
     const argsFile = path.join(root, 'args.json'); await writeFile(argsFile, '\uFEFF{"path":"C:\\\\temp","n":30}');
