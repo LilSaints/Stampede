@@ -1124,7 +1124,7 @@ Stampede update (you started these runs):
 Decide what to do next; reply to agents with workflow_send.
 ```
   Each trigger line ≤ 400 characters (900 for a run's end, which may name cancelled agents' worktrees); at most 8 lines (more → `…and N more updates; call workflow_status`). Total ≤ 3 000 characters.
-- **Limits:** at most `ui.maxWakesPerHour` (default 12). When exceeded, triggers stay in `pendingWake`, the band shows `⚠ wake paused (limit) [Wake now]`, and one toast is shown; `[Wake now]` submits immediately (a person's press bypasses the limit).
+- **Limits:** at most `ui.maxWakesPerHour` (default 24). When exceeded, triggers stay in `pendingWake`, the band shows `⚠ wake paused (limit) [Wake now]`, and one toast is shown; `[Wake now]` submits immediately (a person's press bypasses the limit).
 - **User control:** `/stampede wake on|off` (persisted in `$.store`). Off → triggers still show in band/toasts; band offers `[Tell Claude]` to submit manually.
 - **Interaction with `workflow_wait`:** if Claude is inside `workflow_wait`, the session is busy, so no wake is submitted; the wait returns the event and advances `seenSeq`, so the trigger is dropped at flush. No double notification.
 - `$.prompt.submit` queues until the session is idle (docs); the mod still checks `busy` itself so that triggers arriving during a turn are merged into one wake (S-15 verifies queue semantics).
@@ -1208,7 +1208,7 @@ review-changes  run_…7Q  ● running  12:04  182k / 500k tok   [Pause] [Stop]
               "teamMaxMs": 14400000, "teamMaxMessages": 500, "schemaRepairs": 2, "scriptCpuBlockMs": 10000,
               "claudeTurnMaxUsd": null },
   "store": { "retentionDays": 30, "keepSummaries": true, "fsync": "batch-50ms" },
-  "ui": { "pollMs": 1000, "idlePollMs": 10000, "recentRunsMin": 60, "wakeDebounceMs": 3000, "maxWakesPerHour": 12 }
+  "ui": { "pollMs": 1000, "idlePollMs": 10000, "recentRunsMin": 60, "wakeDebounceMs": 3000, "maxWakesPerHour": 24 }
 }
 ```
 The mod reads the `ui` block from `GET /v1/ui/snapshot` (`uiConfig` field), so all UI tuning lives in this one file; user preferences toggled from the UI (`wakeEnabled`, `compactBand`) live in the mod's `$.store`.

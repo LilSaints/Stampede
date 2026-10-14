@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { readJson } from './store.js';
-export const VERSION = '1.0.0-rc.20';
+export const VERSION = '1.0.0-rc.21';
 export const UI_API_VERSION = 1;
 /** Claude tools workers never need: scheduling, remote triggers, notifications, design sync and worktree switching. */
 export const WORKER_DENY_TOOLS = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'DesignSync', 'EnterWorktree', 'ExitWorktree'];
@@ -19,7 +19,7 @@ export function defaults() {
     delivery: { resumeDebounceMs: 1500, hookBatchMax: 10, claimLeaseMs: 10000 },
     limits: { drainMs: 120000, turnTimeoutMs: 14400000, maxResumesPerAgent: 20, maxStopBlocks: 5, messagesPerAgent: 100, messagesPerRun: 2000, messageBytes: 16384, teamMaxMs: 14400000, teamMaxMessages: 500, schemaRepairs: 2, scriptCpuBlockMs: 10000, claudeTurnMaxUsd: null as number | null },
     store: { retentionDays: 30, keepSummaries: true, fsync: 'batch-50ms' },
-    ui: { pollMs: 1000, idlePollMs: 10000, recentRunsMin: 60, wakeDebounceMs: 3000, maxWakesPerHour: 12 }
+    ui: { pollMs: 1000, idlePollMs: 10000, recentRunsMin: 60, wakeDebounceMs: 3000, maxWakesPerHour: 24 }
   };
 }
 export type Config = ReturnType<typeof defaults>;
