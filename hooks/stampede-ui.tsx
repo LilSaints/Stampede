@@ -5,7 +5,7 @@ type Engine = EngineInterface;
 const terminal = (status: string) => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status);
 const clean = (text: string, max = 400) => String(text).replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, max);
 export function initialState(): StampedeUiState {
-  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], openRuns: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 12 } };
+  return { hub: { url: null, ok: false }, hubSeq: 0, runs: {}, ownedRunIds: [], openRuns: null, paneOpen: false, busy: false, pendingWake: [], wakeTimes: [], wakeEnabled: true, compactBand: false, toastPending: [], pendingSince: 0, lastTrigger: 0, lastToast: 0, cancelConfirm: false, actionPending: false, uiConfig: { pollMs: 1000, idlePollMs: 10000, wakeDebounceMs: 3000, maxWakesPerHour: 24 } };
 }
 export function reduce(state: StampedeUiState, snapshot: any, events: any[], session: string, now: number): StampedeUiState {
   const next = { ...state, runs: {} as StampedeUiState['runs'], pendingWake: [...state.pendingWake], toastPending: [...state.toastPending ?? []], hubSeq: snapshot.hubSeq, hub: { ...state.hub, ok: true, lastError: undefined, versionMismatch: snapshot.uiApiVersion !== 1 }, uiConfig: snapshot.uiConfig ?? state.uiConfig };
