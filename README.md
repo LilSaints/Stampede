@@ -43,7 +43,15 @@ const [api, tests] = await parallel([
 return { api, tests };
 ```
 
-The run starts in the background. Open `/stampede` to watch it, read worker messages, or stop it; your session is woken with the result when it finishes (`/stampede wake off` turns that off). Workflows can also be saved and reused, take `args`, form communicating teams, and resume after an interruption. The bundled `stampede-workflows` skill teaches Claude the full API.
+The run starts in the background. While it runs, a band above the prompt shows a row per run, with a square per worker, its progress and its elapsed time:
+
+<img src="docs/images/stampede-band.png" alt="The Stampede band above the prompt, showing two running workflows" width="560">
+
+Open `/stampede` to watch each run's phases and workers (model, effort, context used and time), read worker messages, or pause and stop a run; your session is woken with the result when it finishes (`/stampede wake off` turns that off).
+
+<img src="docs/images/stampede-pane.png" alt="The /stampede pane, showing a workflow's Implement, Review and Fix phases with a row per worker" width="480">
+
+Workflows can also be saved and reused, take `args`, form communicating teams, and resume after an interruption. The bundled `stampede-workflows` skill teaches Claude the full API.
 
 Workers that edit files leave their changes on a Stampede branch. Inspect and merge those branches yourself.
 
