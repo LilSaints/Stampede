@@ -57,12 +57,13 @@ export class HubClient {
     try { await this.discover(); return; }
     catch (error) { if ((error as Error).message.startsWith('blocked:') || !autoStart) throw error; }
     await launchHub(this.cliEntry, this.home);
-    const deadline = Date.now() + 10000;
+    // Startup protects the whole state folder first (seconds once runs accumulate), then serves /health.
+    const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
       try { await this.discover(); return; } catch (error) { if ((error as Error).message.startsWith('blocked:')) throw error; }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    throw new Error('hub failed to start within 10 seconds; run stampede doctor');
+    throw new Error('hub failed to start within 60 seconds; run stampede doctor');
   }
   async request(route: string, input?: unknown, retry = true): Promise<any> {
     try {

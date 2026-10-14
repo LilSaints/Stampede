@@ -34,7 +34,9 @@ export class Security {
           this.helper!.once('error', error => { clearTimeout(timeout); reject(error); });
           this.helper!.once('exit', code => { clearTimeout(timeout); const error = new Error(`security helper exited ${code}: ${tail}`); this.ancestryActive = false; reject(error); for (const p of this.pending.splice(0)) p.reject(error); });
         });
-        const result = await this.query({ protectState: home });
+        // Protecting the state walks every file under it (about 1.2 ms each), so it outgrows the per-lookup bound as runs accumulate:
+        // 5,131 items took 6.2 s on 2026-10-15 and the hub could not start.
+        const result = await this.query({ protectState: home }, 120000);
         if (!result.ok || !result.acl?.verified) throw new Error(result.error ?? 'state ACL verification failed');
         this.aclVerified = true; this.ancestryActive = ancestry;
       } catch (error) { this.warnings.push((error as Error).message); this.helper?.kill(); this.helper = undefined; throw new Error(`cannot protect Stampede state: ${(error as Error).message}`); }
@@ -52,10 +54,10 @@ export class Security {
       if (ancestry && !this.ancestryActive) this.warnings.push('process ancestry checks unavailable on this platform');
     }
   }
-  private query(input: unknown) {
+  private query(input: unknown, timeoutMs = 5000) {
     return this.mutex.run(() => new Promise<any>((resolve, reject) => {
       if (!this.helper || this.helper.exitCode !== null) { reject(new Error('security helper unavailable')); return; }
-      const timeout = setTimeout(() => { this.helper?.kill(); reject(new Error('security lookup timeout')); }, 5000);
+      const timeout = setTimeout(() => { this.helper?.kill(); reject(new Error('security lookup timeout')); }, timeoutMs);
       this.pending.push({ resolve: value => { clearTimeout(timeout); resolve(value); }, reject: error => { clearTimeout(timeout); reject(error); } });
       this.helper.stdin.write(JSON.stringify(input) + '\n');
     }));
