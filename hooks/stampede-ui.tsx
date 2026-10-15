@@ -538,6 +538,7 @@ done: checkable completion criteria
 reply: exact shape of the answer you want back
 - Cut greetings, hedging, narration, restating the request. Never cut context the reader lacks ("fix the bug we discussed" is broken; name the bug).
 - Plain English and standard notation (code, JSON, paths). No invented abbreviations. One message, one task.
+- Ask for the whole task. Never give the reader a time or effort budget that invites it to cut scope ("fit it in four hours", "keep it small"); split large work into chained agents or phases instead. A reader that calls a task too big after a few minutes has shown no blocker: ask for the evidence.
 - End every reply: with "if a tool call errors or is interrupted, say so; never report a value you did not observe; use blocked:". Stampede's hub already adds this to its workers; don't repeat it in agent() prompts.
 - Replies you send: answer first, then evidence. If stuck: blocked: <reason>; need: <what>.
 - To whoever started you: message only when something is wrong or you need a decision or clarification; progress belongs in your final result.`;
