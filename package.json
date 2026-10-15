@@ -1,6 +1,6 @@
 {
   "name": "stampede",
-  "version": "1.0.0-rc.22",
+  "version": "1.0.0-rc.23",
   "private": true,
   "description": "Deterministic local multi-agent workflows for Claude Code and Codex",
   "type": "module",
