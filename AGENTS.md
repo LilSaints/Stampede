@@ -1,6 +1,6 @@
 # Stampede development
 
-[README.md](README.md) is for users; keep development notes here. The contract is [SPEC.md](docs/SPEC.md); release gates are in [V1_STATUS.md](docs/V1_STATUS.md); [V1_ACCEPTANCE.md](docs/V1_ACCEPTANCE.md) maps requirements to automated, real-backend and terminal evidence (live desktop acceptance is pending).
+[README.md](README.md) describes the product to its users: what it does, how to install, use and configure it. This file is how the repository is maintained and how agents work on it; keep build, release, verification and internal notes here, not in the README. The contract is [SPEC.md](docs/SPEC.md); release gates are in [V1_STATUS.md](docs/V1_STATUS.md); [V1_ACCEPTANCE.md](docs/V1_ACCEPTANCE.md) maps requirements to automated, real-backend and terminal evidence (live desktop acceptance is pending).
 
 ## Setup
 
@@ -16,7 +16,7 @@ The MCP server is declared in `.claude-plugin/plugin.json`. Do not also register
 
 ## Versioning
 
-The version lives in `package.json`, `package-lock.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `src/hub/config.ts` and README.md. The build fails unless they agree. Bump it for every change that should reach an installed copy: `claude plugin update` compares versions only, so an unchanged version leaves the plugin cache stale. A new version also requires a hub restart, because the shim refuses a hub with a different version.
+The version lives in `package.json`, `package-lock.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` and `src/hub/config.ts`. The build fails unless all but `package-lock.json` agree; `npm install` updates that one. Bump it for every change that should reach an installed copy: `claude plugin update` compares versions only, so an unchanged version leaves the plugin cache stale. A new version also requires a hub restart, because the shim refuses a hub with a different version.
 
 ## Installing
 
