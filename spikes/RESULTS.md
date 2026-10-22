@@ -4,6 +4,8 @@ Measured 2026-10-08, Europe/London. The initial S-20–S-23 review is preserved 
 
 Environment: Windows 11, Node 24.20.0, Claude Code 2.1.292, Codex CLI 0.159.2. Model probes used Claude Haiku at low effort and Codex `gpt-6-luna` at low effort; the S-22 resumed turn used medium effort to test the override. Claude calls had a $0.50 per-invocation ceiling.
 
+Evidence paths under `artifacts/` are in the local, Git-ignored `spikes/artifacts/` folder and are not part of the repository.
+
 | Spike | Outcome | Build implication |
 |---|---|---|
 | S-20: Windows caller identity | **Conditional pass.** Both real worker shell ancestry chains were recognized. A persistent helper meets 200 ms; launching PowerShell for each lookup does not. | Start and retain one helper before accepting requests, or leave ancestry hardening off. |
@@ -29,7 +31,7 @@ Real worker checks:
 
 This remains best-effort ancestry hardening. The probes do not make process ancestry a security boundary or remove the spec's detached/service-process limitation.
 
-Evidence: [80-connection benchmark](artifacts/s20-native/s20.json), [Claude chain](artifacts/sessions-clean/summary.json), [Codex chain](artifacts/sessions-windows-explicit/summary.json). Implementation: [benchmark](s20-client-process.mjs), [native lookup helper](windows-client-process.ps1). API references: [GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable), [PROCESSENTRY32W](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w).
+Evidence: 80-connection benchmark (`artifacts/s20-native/s20.json`), Claude chain (`artifacts/sessions-clean/summary.json`), Codex chain (`artifacts/sessions-windows-explicit/summary.json`). Implementation: [benchmark](s20-client-process.mjs), [native lookup helper](windows-client-process.ps1). API references: [GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable), [PROCESSENTRY32W](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/ns-tlhelp32-processentry32w).
 
 ## S-21 — kill during a pending wait, then resume
 
@@ -44,7 +46,7 @@ Neither continuation produced an API or transcript-format error. Codex also emit
 
 This tests a hard kill while a read-only fixture tool is pending. It does not test live-mode interrupts, destructive tools, repeated preemption, or the distinct resolve-the-wait-then-kill race described in §14.5. That race must not be treated as verified by this result: choose the pending-wait kill path or test the alternate sequence separately before using it.
 
-Evidence: [summary](artifacts/sessions-clean/summary.json), [Claude MCP events](artifacts/sessions-clean/s21-claude.mcp.jsonl), [Codex MCP events](artifacts/sessions-clean/s21-codex.mcp.jsonl), and the corresponding start/resume stdout files in that directory.
+Evidence: summary (`artifacts/sessions-clean/summary.json`), Claude MCP events (`artifacts/sessions-clean/s21-claude.mcp.jsonl`), Codex MCP events (`artifacts/sessions-clean/s21-codex.mcp.jsonl`), and the corresponding start/resume stdout files in that directory.
 
 ## S-22 — changed settings on an existing Codex thread
 
@@ -69,7 +71,7 @@ Two additional launch requirements emerged:
 1. **Select the Windows sandbox explicitly after ignoring user config.** This machine's saved setting is `windows.sandbox = "elevated"`. Without re-supplying it, the legacy workspace-write launch produced a read-only turn context and shell calls were rejected. A named workspace profile alone produced the intended context but shell calls were still rejected. Supplying the Windows mode enabled execution; the final legacy-flag test then passed its behavioral controls.
 2. **Set approval behavior for Stampede's own MCP server.** With only `approval_policy="never"`, the initial wait call returned `MCP tool call requires approval, but approval policy is never`. The corrected fixture uses `mcp_servers.stampede.default_tools_approval_mode="approve"` and accurate tool annotations. This is scoped to the fixture server; it does not authorize arbitrary MCP servers. The relevant settings are documented in the [OpenAI configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-Evidence: [final legacy-flag run](artifacts/sessions-legacy-windows/summary.json), [actual tool calls and outputs](artifacts/sessions-legacy-windows/rollout-2026-10-08T04-37-09-01a11996-1705-7273-a005-7383f3636589.jsonl.tool-calls.json), [named-profile run](artifacts/sessions-windows-explicit/summary.json). If the generated rollout filename differs, use the `*.tool-calls.json` and `*.turn-contexts.json` files in the linked run directory.
+Evidence: final legacy-flag run (`artifacts/sessions-legacy-windows/summary.json`), actual tool calls and outputs (`artifacts/sessions-legacy-windows/rollout-2026-10-08T04-37-09-01a11996-1705-7273-a005-7383f3636589.jsonl.tool-calls.json`), named-profile run (`artifacts/sessions-windows-explicit/summary.json`). If the generated rollout filename differs, use the `*.tool-calls.json` and `*.turn-contexts.json` files in that run directory.
 
 ## S-23 — independent Windows sandbox controls
 
@@ -87,7 +89,7 @@ All canaries were synthetic. No actual credentials, `hub.token`, or unrelated us
 
 This result supports “not confined to workspace reads”; it does **not** support the stronger statement that a sandboxed Codex command can do everything the user can. File ACLs and write restrictions mattered in these tests. MCP server processes are a separate trust surface and were not covered by this filesystem test.
 
-Evidence: [direct sandbox results, including ACL and write controls](artifacts/s23-confirmed/s23.json), [real agent confirmation](artifacts/sessions-legacy-windows/summary.json). Probe: [s23-windows-sandbox.mjs](s23-windows-sandbox.mjs).
+Evidence: direct sandbox results, including ACL and write controls (`artifacts/s23-confirmed/s23.json`), real agent confirmation (`artifacts/sessions-legacy-windows/summary.json`). Probe: [s23-windows-sandbox.mjs](s23-windows-sandbox.mjs).
 
 ## Implementation qualification — 2026-10-08
 

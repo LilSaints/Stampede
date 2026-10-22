@@ -42,7 +42,7 @@ test('Codex stream items become transcript entries, a failed command with its ex
   assert.deepEqual(streamEntries('codex', { type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } }), []);
 });
 test('a Codex command reads as written, without the shell it runs in', () => {
-  assert.equal(unwrapShell(String.raw`"C:\\Users\\Marco\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "rg -n 'a|b' C:\\src; git status --short"`), String.raw`rg -n 'a|b' C:\src; git status --short`);
+  assert.equal(unwrapShell(String.raw`"C:\\Users\\Fixture\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe" -Command "rg -n 'a|b' C:\\src; git status --short"`), String.raw`rg -n 'a|b' C:\src; git status --short`);
   assert.equal(unwrapShell(String.raw`"C:\\Program Files\\PowerShell\\7\\pwsh.exe" -NoProfile -Command "Write-Output \"hi\""`), 'Write-Output "hi"');
   assert.equal(unwrapShell(`/bin/bash -lc 'npm test -- --grep "pane"'`), 'npm test -- --grep "pane"');
   assert.equal(unwrapShell('npm  test'), 'npm  test');
